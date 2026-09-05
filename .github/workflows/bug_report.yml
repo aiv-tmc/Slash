@@ -1,0 +1,98 @@
+name: Bug Report
+description: File a bug report for consensus, state, networking, or tooling.
+title: "[BUG] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Please fill out the sections below to help us diagnose and fix the issue quickly.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What version of Slash are you running?
+      placeholder: "0.2.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which area of the codebase is affected?
+      options:
+        - Consensus / Mining
+        - State Engine (PMIS)
+        - P2P Networking
+        - JSON-RPC API
+        - Storage / Persistence
+        - Cryptography
+        - Governance / Version Bits
+        - Onion Routing
+        - Build / CI
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Provide a minimal code snippet, test case, or sequence of commands that triggers the bug.
+      placeholder: |
+        1. Start node with `cargo run -- --testnet`
+        2. Submit transaction via RPC ...
+        3. Observe panic in `state.rs:line 145`
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages, stack traces, and logs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust version, and any relevant hardware details.
+      placeholder: |
+        - OS: Ubuntu 22.04
+        - Rust: 1.75.0
+        - CPU: AMD Ryzen 9 5900X
+        - RAM: 32 GB
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues to ensure this is not a duplicate.
+          required: true
+        - label: I have included a minimal reproduction case.
+          required: true
+        - label: I have included relevant logs or stack traces.
+          required: true
