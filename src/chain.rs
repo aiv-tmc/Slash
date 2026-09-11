@@ -1,7 +1,7 @@
-use serde::{Serialize, Deserialize};
-use std::collections::{BTreeMap, HashMap};
 use blake3::Hasher;
 use rust_randomx::Hasher as RandomXHasher;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 
 /// Maximum transactions allowed inside a single block.
 pub const MAX_TX_PER_BLOCK: usize = 1000;
@@ -120,7 +120,10 @@ pub enum BlockProcessResult {
     ExtendedMain,
     Orphan,
     Duplicate,
-    Reorged { disconnected: Vec<u64>, connected: Vec<u64> },
+    Reorged {
+        disconnected: Vec<u64>,
+        connected: Vec<u64>,
+    },
     /// The block extends a known side fork that is not yet heavier than the main chain.
     SideFork,
 }
@@ -167,7 +170,9 @@ impl Chain {
             state,
             state_history: BTreeMap::new(),
             checkpoints: BTreeMap::new(),
-            version_bits: VersionBits { deployments: Vec::new() },
+            version_bits: VersionBits {
+                deployments: Vec::new(),
+            },
             chain_id: b"/slash/0.2.0".to_vec(),
             orphan_blocks: HashMap::new(),
             side_forks: HashMap::new(),
@@ -241,7 +246,7 @@ impl Chain {
             return self.blocks.last().map_or(1, |b| b.difficulty);
         }
         let tip_height = len - 1 + self.base_height;
-        if tip_height % DIFFICULTY_ADJUSTMENT_INTERVAL != 0 {
+        if !tip_height.is_multiple_of(DIFFICULTY_ADJUSTMENT_INTERVAL) {
             return self.blocks.last().unwrap().difficulty;
         }
         let start_idx = len.saturating_sub(DIFFICULTY_ADJUSTMENT_INTERVAL) as usize;
@@ -255,8 +260,12 @@ impl Chain {
             .saturating_div(actual_time as u128) as u64;
         let max_diff = last_diff.saturating_mul(4);
         let min_diff = last_diff.saturating_div(4).max(1);
-        if new_diff > max_diff { new_diff = max_diff; }
-        if new_diff < min_diff { new_diff = min_diff; }
+        if new_diff > max_diff {
+            new_diff = max_diff;
+        }
+        if new_diff < min_diff {
+            new_diff = min_diff;
+        }
         new_diff
     }
 
@@ -264,7 +273,9 @@ impl Chain {
     /// Used to enforce monotonic time rules.
     pub fn median_timestamp(&self) -> u64 {
         let mut times: Vec<u64> = self.blocks.iter().map(|b| b.time).collect();
-        if times.is_empty() { return 0; }
+        if times.is_empty() {
+            return 0;
+        }
         let start = times.len().saturating_sub(11);
         let slice = &mut times[start..];
         slice.sort_unstable();
@@ -296,7 +307,15 @@ impl Chain {
         if header.difficulty != self.next_difficulty() {
             return false;
         }
-        verify_pow(header.prev, header.time, header.height, header.miner, header.nonce, header.difficulty).is_some()
+        verify_pow(
+            header.prev,
+            header.time,
+            header.height,
+            header.miner,
+            header.nonce,
+            header.difficulty,
+        )
+        .is_some()
     }
 
     /// Fully validate a block: structure, size, PoW, timestamps, governance rules, and state transition.
@@ -324,7 +343,16 @@ impl Chain {
         if size > MAX_BLOCK_SIZE_BYTES {
             return false;
         }
-        if verify_pow(block.prev, block.time, block.height, block.miner, block.nonce, block.difficulty).is_none() {
+        if verify_pow(
+            block.prev,
+            block.time,
+            block.height,
+            block.miner,
+            block.nonce,
+            block.difficulty,
+        )
+        .is_none()
+        {
             return false;
         }
         if block.difficulty != self.next_difficulty() {
@@ -352,7 +380,15 @@ impl Chain {
         // transactions share the same validation path because State::tx already
         // skips the signature check for the treasury address.
         for tx in &block.txs {
-            if !temp.tx(tx.from, &tx.inputs, &tx.outputs, &tx.sig, block.height, &self.chain_id, tx.scheme) {
+            if !temp.tx(
+                tx.from,
+                &tx.inputs,
+                &tx.outputs,
+                &tx.sig,
+                block.height,
+                &self.chain_id,
+                tx.scheme,
+            ) {
                 return false;
             }
         }
@@ -373,7 +409,15 @@ impl Chain {
         temp.mine(block.mined_cell, block.miner, block.height);
         let _ = temp.claim_fees(block.miner, &block.fee_claims, block.height);
         for tx in &block.txs {
-            let _ = temp.tx(tx.from, &tx.inputs, &tx.outputs, &tx.sig, block.height, &self.chain_id, tx.scheme);
+            let _ = temp.tx(
+                tx.from,
+                &tx.inputs,
+                &tx.outputs,
+                &tx.sig,
+                block.height,
+                &self.chain_id,
+                tx.scheme,
+            );
         }
         let mut roots = BTreeMap::new();
         for (&page_id, page) in &temp.pages {
@@ -390,11 +434,22 @@ impl Chain {
             return Err(BlockError::InvalidTx);
         }
         self.state.mine(block.mined_cell, block.miner, block.height);
-        if !self.state.claim_fees(block.miner, &block.fee_claims, block.height) {
+        if !self
+            .state
+            .claim_fees(block.miner, &block.fee_claims, block.height)
+        {
             return Err(BlockError::InvalidTx);
         }
         for tx in &block.txs {
-            if !self.state.tx(tx.from, &tx.inputs, &tx.outputs, &tx.sig, block.height, &self.chain_id, tx.scheme) {
+            if !self.state.tx(
+                tx.from,
+                &tx.inputs,
+                &tx.outputs,
+                &tx.sig,
+                block.height,
+                &self.chain_id,
+                tx.scheme,
+            ) {
                 return Err(BlockError::InvalidTx);
             }
         }
@@ -407,6 +462,18 @@ impl Chain {
         // Update version bits.
         self.update_version_bits(&block);
         Ok(())
+    }
+
+    /// Walk backwards from a block through the side-fork pool to compute
+    /// how many blocks extend beyond the main-chain common ancestor.
+    fn compute_fork_length(&self, block: &Block) -> u64 {
+        let mut len = 1u64;
+        let mut current_hash = block.prev;
+        while let Some(parent_block) = self.side_forks.get(&current_hash) {
+            len += 1;
+            current_hash = parent_block.prev;
+        }
+        len
     }
 
     /// Attempt to add a block that may extend the main chain, a side fork,
@@ -424,7 +491,7 @@ impl Chain {
                 }
             }
         }
-        // Duplicate detection across both the main chain and the orphan pool.
+        // Duplicate detection across the main chain, orphan pool, and side forks.
         for b in &self.blocks {
             if self.block_hash(b) == hash {
                 return Ok(BlockProcessResult::Duplicate);
@@ -443,31 +510,52 @@ impl Chain {
             self.process_orphans()?;
             return Ok(BlockProcessResult::ExtendedMain);
         }
-        // Search for the parent inside the existing chain.
-        let parent_known = self.blocks.iter().any(|b| self.block_hash(b) == block.prev);
-        if parent_known {
-            // Side fork: compare lengths to decide reorg.
-            let fork_common_height = block.height - 1;
-            let main_len_after_common = expected_main - 1 - fork_common_height;
-            let fork_len = 1; // This block starts the visible fork tail.
+        // Search for the parent inside the main chain or existing side forks.
+        let parent_in_main = self.blocks.iter().any(|b| self.block_hash(b) == block.prev);
+        let parent_in_side = self.side_forks.contains_key(&block.prev);
+        if parent_in_main || parent_in_side {
+            // Calculate the total length of the fork tail from the common ancestor.
+            let fork_len = self.compute_fork_length(&block);
+            let fork_common_height = block.height.saturating_sub(fork_len);
+            let main_len_after_common = expected_main
+                .saturating_sub(1)
+                .saturating_sub(fork_common_height);
             if fork_len > main_len_after_common {
                 let mut disconnected = Vec::new();
                 let mut connected = Vec::new();
-                // Roll back to common ancestor.
-                while self.blocks.len() as u64 + self.base_height > block.height {
+
+                // Reconstruct the full fork chain from common ancestor to new tip.
+                let mut fork_chain = vec![block.clone()];
+                let mut current_hash = block.prev;
+                while let Some(parent) = self.side_forks.get(&current_hash) {
+                    fork_chain.push(parent.clone());
+                    current_hash = parent.prev;
+                }
+                fork_chain.reverse();
+
+                // Roll back to the common ancestor.
+                while self.blocks.len() as u64 + self.base_height > fork_common_height + 1 {
                     if let Some(b) = self.blocks.pop() {
                         disconnected.push(b.height);
                     }
                 }
-                // Restore state at common ancestor.
+                // Restore state at the common ancestor.
                 if let Some(st) = self.state_history.get(&fork_common_height) {
                     self.state = st.clone();
                 }
-                // Apply the new fork block.
-                self.apply(block.clone())?;
-                self.process_orphans()?;
-                connected.push(block.height);
-                return Ok(BlockProcessResult::Reorged { disconnected, connected });
+
+                // Apply every block in the fork chain, promoting it to the main chain.
+                for fb in fork_chain {
+                    let fb_hash = self.block_hash(&fb);
+                    self.side_forks.remove(&fb_hash);
+                    self.apply(fb.clone())?;
+                    self.process_orphans()?;
+                    connected.push(fb.height);
+                }
+                return Ok(BlockProcessResult::Reorged {
+                    disconnected,
+                    connected,
+                });
             } else {
                 // Short fork: retain the block so it is not lost.
                 self.side_forks.insert(hash, block);
@@ -498,7 +586,9 @@ impl Chain {
                     break;
                 }
             }
-            let Some(hash) = next_orphan_hash else { break; };
+            let Some(hash) = next_orphan_hash else {
+                break;
+            };
             if let Some(block) = self.orphan_blocks.remove(&hash) {
                 if self.apply(block).is_err() {
                     // Invalid orphan: drop it and continue trying others.
@@ -511,7 +601,11 @@ impl Chain {
 
     /// Roll the chain back to a specific common ancestor height and replay
     /// a sequence of fork blocks. Used explicitly in checkpoint tests.
-    pub fn reorg_to_fork(&mut self, common_ancestor_height: u64, _fork_blocks: &[Block]) -> Result<(), BlockError> {
+    pub fn reorg_to_fork(
+        &mut self,
+        common_ancestor_height: u64,
+        _fork_blocks: &[Block],
+    ) -> Result<(), BlockError> {
         if let Some((&max_cp, _)) = self.checkpoints.iter().next_back() {
             if common_ancestor_height < max_cp {
                 return Err(BlockError::CheckpointViolation);
@@ -535,7 +629,10 @@ impl Chain {
             if block.height < d.start_height {
                 continue;
             }
-            if block.height > d.timeout_height && d.status != DeploymentStatus::LockedIn && d.status != DeploymentStatus::Active {
+            if block.height > d.timeout_height
+                && d.status != DeploymentStatus::LockedIn
+                && d.status != DeploymentStatus::Active
+            {
                 d.status = DeploymentStatus::Failed;
                 continue;
             }
@@ -582,7 +679,8 @@ impl Chain {
         }
 
         if tx.from != crate::state::TREASURY {
-            let hash = tx_signature_hash(&tx.from, &tx.inputs, &tx.outputs, &self.chain_id, tx.scheme);
+            let hash =
+                tx_signature_hash(&tx.from, &tx.inputs, &tx.outputs, &self.chain_id, tx.scheme);
             if !crate::crypto::verify(&tx.from, &hash, &tx.sig) {
                 return false;
             }
@@ -614,7 +712,11 @@ impl Chain {
             return false;
         }
         // Scheme 1 is only permitted when the AllowScheme1 soft-fork is active.
-        if tx.scheme == 1 && !rules.iter().any(|r| matches!(r, crate::governance::Rule::AllowScheme1)) {
+        if tx.scheme == 1
+            && !rules
+                .iter()
+                .any(|r| matches!(r, crate::governance::Rule::AllowScheme1))
+        {
             return false;
         }
         true
@@ -624,7 +726,13 @@ impl Chain {
 /// Compute the blake3 digest that a transaction must sign.
 /// Includes the sender, every input and output, the chain identifier,
 /// and the scheme byte to prevent replay across networks and future schemes.
-pub fn tx_signature_hash(from: &[u8; 32], inputs: &[(u64, u64)], outputs: &[crate::state::Output], chain_id: &[u8], scheme: u8) -> Vec<u8> {
+pub fn tx_signature_hash(
+    from: &[u8; 32],
+    inputs: &[(u64, u64)],
+    outputs: &[crate::state::Output],
+    chain_id: &[u8],
+    scheme: u8,
+) -> Vec<u8> {
     let mut h = Hasher::new();
     h.update(from);
     for (s, e) in inputs {
@@ -649,7 +757,14 @@ pub fn tx_signature_hash(from: &[u8; 32], inputs: &[(u64, u64)], outputs: &[crat
 /// same prev hash do not pay the context-creation penalty. The hash input is
 /// identical to the one constructed by the miner in mining.rs, guaranteeing
 /// consensus between production and validation.
-pub fn verify_pow(prev: [u8; 32], time: u64, height: u64, miner: [u8; 32], nonce: u64, difficulty: u64) -> Option<u64> {
+pub fn verify_pow(
+    prev: [u8; 32],
+    time: u64,
+    height: u64,
+    miner: [u8; 32],
+    nonce: u64,
+    difficulty: u64,
+) -> Option<u64> {
     let ctx = crate::mining::get_context(&prev, false);
     let hasher = RandomXHasher::new(ctx);
     let mut inp = Vec::new();

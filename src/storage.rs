@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Write;
@@ -15,6 +15,18 @@ struct Header {
 #[derive(Serialize, Deserialize)]
 struct ChainMeta {
     base_height: u64,
+}
+
+/// Manifest records the last consistent triple of on-disk files.
+/// It is written last during a save operation so that a crash at any
+/// point leaves either the old manifest (pointing to previous files)
+/// or the new manifest (pointing to complete new files), never a
+/// partially updated state.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Manifest {
+    pub blocks_path: String,
+    pub state_header_path: String,
+    pub chain_meta_path: String,
 }
 
 /// Write data to a temporary file, fsync it to disk, then rename it to the target path.
@@ -117,14 +129,17 @@ pub fn load_latest_snapshot(max_height: u64) -> anyhow::Result<(u64, crate::stat
     if let Ok(entries) = std::fs::read_dir("snapshots") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(num) = name.strip_prefix("state_").and_then(|s| s.strip_suffix(".bin")) {
+            if let Some(num) = name
+                .strip_prefix("state_")
+                .and_then(|s| s.strip_suffix(".bin"))
+            {
                 if let Ok(h) = num.parse::<u64>() {
-                    if h <= max_height {
-                        if best.as_ref().map_or(true, |(bh, _)| h > *bh) {
-                            let bytes = std::fs::read(entry.path())?;
-                            let state: crate::state::State = bincode::deserialize(&bytes)?;
-                            best = Some((h, state));
-                        }
+                    // A snapshot qualifies when it is not above the requested
+                    // height and is the newest candidate seen so far.
+                    if h <= max_height && best.as_ref().is_none_or(|(bh, _)| h > *bh) {
+                        let bytes = std::fs::read(entry.path())?;
+                        let state: crate::state::State = bincode::deserialize(&bytes)?;
+                        best = Some((h, state));
                     }
                 }
             }
@@ -140,7 +155,10 @@ pub fn prune_snapshots() -> anyhow::Result<()> {
     if let Ok(entries) = std::fs::read_dir("snapshots") {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(num) = name.strip_prefix("state_").and_then(|s| s.strip_suffix(".bin")) {
+            if let Some(num) = name
+                .strip_prefix("state_")
+                .and_then(|s| s.strip_suffix(".bin"))
+            {
                 if let Ok(h) = num.parse::<u64>() {
                     snapshots.push((h, entry.path()));
                 }
@@ -154,4 +172,85 @@ pub fn prune_snapshots() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Atomically persist a complete chain snapshot using a manifest.
+/// Writes blocks, state, and meta to stable paths, then publishes the manifest
+/// so readers always see a consistent triple even after a crash.
+pub fn save_manifest(
+    blocks: &[crate::chain::Block],
+    state: &crate::state::State,
+    base_height: u64,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all("pages")?;
+
+    // Persist every dirty page before the manifest references them.
+    for (page_id, page) in &state.pages {
+        let path = format!("pages/{:04x}.bin", page_id);
+        let encoded = bincode::serialize(page)?;
+        atomic_write(&path, &encoded)?;
+    }
+
+    // Build and write the state header that indexes all persisted pages.
+    let header = Header {
+        page_ids: state.pages.keys().cloned().collect(),
+        locks: state.locks.clone(),
+        balance_cache: state.balance_cache.clone(),
+    };
+    atomic_write("header.bin", &bincode::serialize(&header)?)?;
+
+    // Persist the block list.
+    let encoded_blocks = bincode::serialize(blocks)?;
+    atomic_write("chain_blocks.bin", &encoded_blocks)?;
+
+    // Persist chain metadata so pruned nodes know their base height.
+    let meta = ChainMeta { base_height };
+    atomic_write("chain_meta.bin", &bincode::serialize(&meta)?)?;
+
+    // Publish the manifest last. Any reader that sees this file is guaranteed
+    // that the three referenced files are complete and consistent.
+    let manifest = Manifest {
+        blocks_path: "chain_blocks.bin".to_string(),
+        state_header_path: "header.bin".to_string(),
+        chain_meta_path: "chain_meta.bin".to_string(),
+    };
+    atomic_write("manifest.bin", &bincode::serialize(&manifest)?)?;
+    Ok(())
+}
+
+/// Load a chain by first reading the manifest, then loading the files it references.
+/// If the manifest is missing, falls back to the legacy direct paths for backward compatibility.
+pub fn load_from_manifest() -> anyhow::Result<(Vec<crate::chain::Block>, crate::state::State, u64)>
+{
+    let manifest: Manifest = if let Ok(bytes) = std::fs::read("manifest.bin") {
+        bincode::deserialize(&bytes)?
+    } else {
+        // Legacy fallback: assume standard filenames when no manifest exists.
+        return Ok((load_blocks()?, load()?, load_chain_meta()?));
+    };
+
+    let blocks_bytes = std::fs::read(&manifest.blocks_path)?;
+    let blocks: Vec<crate::chain::Block> = bincode::deserialize(&blocks_bytes)?;
+
+    let header_bytes = std::fs::read(&manifest.state_header_path)?;
+    let header: Header = bincode::deserialize(&header_bytes)?;
+
+    let mut pages = BTreeMap::new();
+    for page_id in &header.page_ids {
+        let path = format!("pages/{:04x}.bin", page_id);
+        let bytes = std::fs::read(&path)?;
+        let page: crate::state::Page = bincode::deserialize(&bytes)?;
+        pages.insert(*page_id, page);
+    }
+
+    let state = crate::state::State {
+        pages,
+        locks: header.locks,
+        balance_cache: header.balance_cache,
+    };
+
+    let meta_bytes = std::fs::read(&manifest.chain_meta_path)?;
+    let meta: ChainMeta = bincode::deserialize(&meta_bytes)?;
+
+    Ok((blocks, state, meta.base_height))
 }

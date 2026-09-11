@@ -1,9 +1,12 @@
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock, atomic::{AtomicBool, Ordering}};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use rust_randomx::{Context, Hasher};
 use crate::chain::Block;
+use rust_randomx::{Context, Hasher};
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
+use std::time::{Duration, Instant};
 
 /// Cached RandomX context together with the timestamp of its last use.
 struct CachedContext {
@@ -11,12 +14,15 @@ struct CachedContext {
     last_used: Instant,
 }
 
-/// Global cache: (prev hash, full_mem flag) -> cached context.
-/// The boolean distinguishes mining contexts (full memory) from verification
-/// contexts (light memory) so that a light context never shadows a full one.
-static CONTEXT_CACHE: OnceLock<Mutex<HashMap<([u8; 32], bool), CachedContext>>> = OnceLock::new();
+/// Cache key: the previous block hash together with a flag that distinguishes
+/// mining contexts (full memory) from verification contexts (light memory),
+/// so that a light context never shadows a full one.
+type ContextKey = ([u8; 32], bool);
 
-fn get_context_cache() -> &'static Mutex<HashMap<([u8; 32], bool), CachedContext>> {
+/// Global cache mapping a context key to its cached RandomX context.
+static CONTEXT_CACHE: OnceLock<Mutex<HashMap<ContextKey, CachedContext>>> = OnceLock::new();
+
+fn get_context_cache() -> &'static Mutex<HashMap<ContextKey, CachedContext>> {
     CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -34,10 +40,13 @@ pub fn get_context(prev: &[u8; 32], full_mem: bool) -> Arc<Context> {
         return Arc::clone(&entry.context);
     }
     let ctx = Arc::new(Context::new(prev, full_mem));
-    cache.insert(key, CachedContext {
-        context: Arc::clone(&ctx),
-        last_used: now,
-    });
+    cache.insert(
+        key,
+        CachedContext {
+            context: Arc::clone(&ctx),
+            last_used: now,
+        },
+    );
     ctx
 }
 
@@ -48,7 +57,13 @@ impl Miner {
     /// Automatically uses all available CPU cores via extranonce threading.
     /// Accepts an optional cancellation flag; when the flag becomes true all
     /// workers stop searching immediately so the event loop never stalls.
-    pub fn mine(prev: [u8; 32], height: u64, miner: [u8; 32], diff: u64, cancel: Option<Arc<AtomicBool>>) -> Option<Block> {
+    pub fn mine(
+        prev: [u8; 32],
+        height: u64,
+        miner: [u8; 32],
+        diff: u64,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Option<Block> {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
@@ -60,7 +75,14 @@ impl Miner {
     /// The first thread to find a valid hash sends the block back and all workers terminate.
     /// If the cancellation flag is set before a solution is found, every worker exits
     /// and None is returned.
-    pub fn mine_parallel(prev: [u8; 32], height: u64, miner: [u8; 32], diff: u64, threads: usize, cancel: Option<Arc<AtomicBool>>) -> Option<Block> {
+    pub fn mine_parallel(
+        prev: [u8; 32],
+        height: u64,
+        miner: [u8; 32],
+        diff: u64,
+        threads: usize,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Option<Block> {
         let threads = threads.max(1);
         let ctx = get_context(&prev, true);
         let time = chrono::Utc::now().timestamp() as u64;
@@ -118,9 +140,6 @@ impl Miner {
         // Drop the original sender so recv() unblocks as soon as any thread finishes.
         drop(tx);
         // If cancellation fires before a solution arrives, recv() returns Err.
-        match rx.recv() {
-            Ok(block) => Some(block),
-            Err(_) => None,
-        }
+        rx.recv().ok()
     }
 }

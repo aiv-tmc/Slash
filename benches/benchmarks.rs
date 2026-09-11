@@ -24,6 +24,7 @@ fn bench_state_tx_small(c: &mut Criterion) {
         })
         .collect();
 
+    // Use the canonical mainnet chain identifier for replay protection.
     let chain_id = b"/slash/0.2.0";
     let hash = slash::chain::tx_signature_hash(&owner, &inputs, &outputs, chain_id, 0);
     let (sk, _pk) = slash::crypto::generate_keypair();
@@ -62,6 +63,7 @@ fn bench_state_tx_cross_page(c: &mut Criterion) {
         })
         .collect();
 
+    // Use the canonical mainnet chain identifier for replay protection.
     let chain_id = b"/slash/0.2.0";
     let hash = slash::chain::tx_signature_hash(&owner, &inputs, &outputs, chain_id, 0);
     let (sk, _pk) = slash::crypto::generate_keypair();

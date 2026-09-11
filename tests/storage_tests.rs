@@ -1,7 +1,6 @@
 //! End-to-end tests for atomic storage, snapshot lifecycle, and pruned recovery.
 
 use slash::*;
-use std::collections::BTreeMap;
 
 mod common;
 use common::*;

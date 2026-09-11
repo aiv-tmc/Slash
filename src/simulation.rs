@@ -36,7 +36,8 @@ pub fn simulate_hashrate_drop(config: &SimulationConfig) -> SimulationResult {
 
     // Establish baseline difficulty with normal block times.
     for h in 1..=config.initial_blocks {
-        let mut b = mine_block(&chain, h, miner, 1);
+        // Use the current difficulty target so the block passes validation.
+        let mut b = mine_block(&chain, h, miner, chain.next_difficulty());
         b.time = h * config.target_block_time_secs;
         let b = chain.prepare_block(b);
         chain.apply(b).unwrap();
@@ -74,11 +75,12 @@ pub fn simulate_fee_spike(_config: &SimulationConfig) -> SimulationResult {
     let mut chain = Chain::genesis();
     let owner = [1u8; 32];
     let mut mempool: Vec<crate::chain::Tx> = Vec::new();
-    let mut mempool_spent: std::collections::BTreeMap<u64, Vec<u8>> = std::collections::BTreeMap::new();
+    let mut mempool_spent: std::collections::BTreeMap<u64, Vec<u8>> =
+        std::collections::BTreeMap::new();
 
     // Mine an initial supply so that inputs exist for the spam transactions.
-    for h in 1..=50 {
-        let b = mine_block(&chain, h, owner, 1);
+    for i in 0..50 {
+        let b = mine_block(&chain, i + 1, owner, chain.next_difficulty());
         let b = chain.prepare_block(b);
         chain.apply(b).unwrap();
     }
@@ -91,7 +93,7 @@ pub fn simulate_fee_spike(_config: &SimulationConfig) -> SimulationResult {
     for i in 0..15_000 {
         let cell = i % 50;
         let inputs = vec![(cell, cell + 1)];
-        let fee = i as u64;
+        let fee = i;
         let outputs = vec![
             Output {
                 start: cell,

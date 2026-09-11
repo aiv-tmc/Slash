@@ -1,9 +1,4 @@
-use axum::{
-    extract::Json,
-    response::IntoResponse,
-    routing::post,
-    Router,
-};
+use axum::{extract::Json, response::IntoResponse, routing::post, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -57,25 +52,29 @@ async fn rpc_handler(Json(req): Json<RpcRequest>) -> impl IntoResponse {
 
 /// Parse the first parameter as a hex-encoded 32-byte address.
 fn parse_address(params: &[Value]) -> anyhow::Result<[u8; 32]> {
-    let hex_str = params.get(0)
+    let hex_str = params
+        .first()
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing address parameter"))?;
     let bytes = hex::decode(hex_str)?;
-    let arr: [u8; 32] = bytes.try_into()
+    let arr: [u8; 32] = bytes
+        .try_into()
         .map_err(|_| anyhow::anyhow!("address must be 32 bytes (64 hex chars)"))?;
     Ok(arr)
 }
 
 /// Parse the first parameter as a u64 height.
 fn parse_height(params: &[Value]) -> anyhow::Result<u64> {
-    params.get(0)
+    params
+        .first()
         .and_then(|v| v.as_u64())
         .ok_or_else(|| anyhow::anyhow!("missing or invalid height parameter"))
 }
 
 /// Parse the first parameter as a hex string.
 fn parse_hex(params: &[Value]) -> anyhow::Result<Vec<u8>> {
-    let hex_str = params.get(0)
+    let hex_str = params
+        .first()
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing hex parameter"))?;
     Ok(hex::decode(hex_str)?)
@@ -105,15 +104,16 @@ fn handle_get_block(params: &[Value]) -> anyhow::Result<Value> {
 }
 
 /// Deserialize a raw transaction from hex-encoded bincode bytes and validate it
-/// against the current chain tip. Returns true if the transaction is well-formed
-/// and its inputs are currently unspent and unlocked.
+/// against the current chain tip. If valid, the transaction is queued into the
+/// global pending buffer so that the P2P node can ingest it into the local
+/// mempool and forward it to the network.
 fn handle_send_raw_tx(params: &[Value]) -> anyhow::Result<Value> {
     let raw = parse_hex(params)?;
     let tx: crate::chain::Tx = bincode::deserialize(&raw)
         .map_err(|e| anyhow::anyhow!("invalid transaction encoding: {}", e))?;
     let chain = crate::load();
     let height = chain.blocks.len() as u64 + chain.base_height;
-    
+
     // Basic structural validation.
     if tx.inputs.is_empty() {
         return Err(anyhow::anyhow!("transaction has no inputs"));
@@ -126,21 +126,27 @@ fn handle_send_raw_tx(params: &[Value]) -> anyhow::Result<Value> {
     if total_out < crate::state::MIN {
         return Err(anyhow::anyhow!("transaction output below minimum"));
     }
-    
+
     // Reject scheme identifiers outside the known set (0 and 1).
     if tx.scheme != 0 && tx.scheme != 1 {
         return Err(anyhow::anyhow!("unknown signature scheme {}", tx.scheme));
     }
-    
+
     // Signature check (skip for treasury) using the canonical tx_signature_hash
     // so that RPC validation always agrees with consensus validation.
     if tx.from != crate::state::TREASURY {
-        let hash = crate::chain::tx_signature_hash(&tx.from, &tx.inputs, &tx.outputs, &chain.chain_id, tx.scheme);
+        let hash = crate::chain::tx_signature_hash(
+            &tx.from,
+            &tx.inputs,
+            &tx.outputs,
+            &chain.chain_id,
+            tx.scheme,
+        );
         if !crate::crypto::verify(&tx.from, &hash, &tx.sig) {
             return Err(anyhow::anyhow!("invalid signature"));
         }
     }
-    
+
     // Ownership and lock checks.
     for (s, e) in &tx.inputs {
         let mut cur = *s;
@@ -164,12 +170,22 @@ fn handle_send_raw_tx(params: &[Value]) -> anyhow::Result<Value> {
     // Scheme 1 requires the AllowScheme1 soft-fork to be active.
     if tx.scheme == 1 {
         let rules = crate::governance::active_rules(&chain.version_bits.deployments, height);
-        if !rules.iter().any(|r| matches!(r, crate::governance::Rule::AllowScheme1)) {
+        if !rules
+            .iter()
+            .any(|r| matches!(r, crate::governance::Rule::AllowScheme1))
+        {
             return Err(anyhow::anyhow!("scheme 1 not yet activated"));
         }
     }
-    
-    Ok(json!(true))
+
+    // Queue the validated transaction into the global pending buffer
+    // so that the P2P node can ingest it into the local mempool and
+    // forward it to peers via gossipsub.
+    crate::submit_pending_tx(tx.clone());
+
+    // Return the transaction hash so the caller can track inclusion.
+    let tx_hash = blake3::hash(&tx.sig).as_bytes().to_vec();
+    Ok(json!(hex::encode(tx_hash)))
 }
 
 /// Return the current tip height and its block hash.
@@ -192,7 +208,8 @@ fn handle_get_difficulty() -> anyhow::Result<Value> {
 /// Return a Merkle proof for the page containing the given cell.
 /// Light clients use this to verify ownership in O(log R_page).
 fn handle_get_page_proof(params: &[Value]) -> anyhow::Result<Value> {
-    let cell = params.get(0)
+    let cell = params
+        .first()
         .and_then(|v| v.as_u64())
         .ok_or_else(|| anyhow::anyhow!("missing or invalid cell parameter"))?;
     let chain = crate::load();
@@ -201,12 +218,13 @@ fn handle_get_page_proof(params: &[Value]) -> anyhow::Result<Value> {
     }
     let page_id = (cell / crate::state::PAGE_SIZE) as u16;
     let offset = cell % crate::state::PAGE_SIZE;
-    
+
     // Load the page (materialising it if it is still clean).
     let page = chain.state.get_page(page_id);
-    let proof = page.merkle_proof(offset)
+    let proof = page
+        .merkle_proof(offset)
         .ok_or_else(|| anyhow::anyhow!("cell {} is not contained in any range", cell))?;
-    
+
     // Include the page root so the verifier knows what to check against.
     let root = page.merkle_root();
     Ok(json!({

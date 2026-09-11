@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Base price in fiat cents per cell at the very start of the bonding curve.
 pub const BASE_PRICE: u64 = 1;
@@ -43,7 +43,9 @@ impl TreasuryState {
     /// Calculate the total cost in fiat cents to buy `amount` cells from the treasury.
     /// Uses the integral of the linear bonding curve: price per cell increases as total_sold grows.
     pub fn buy_price(&self, amount: u64) -> u64 {
-        if amount == 0 { return 0; }
+        if amount == 0 {
+            return 0;
+        }
         let a = amount as u128;
         let s = self.total_sold as u128;
         let k = K as u128;

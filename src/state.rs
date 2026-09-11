@@ -12,7 +12,9 @@ pub const TREASURY: [u8; 32] = [0; 32];
 pub const FEE_VAULT: [u8; 32] = [1u8; 32];
 
 /// One contiguous range inside a single page.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// PartialEq and Eq are derived so that Page structures can be compared
+/// in tests and assertions that verify atomic rollback behaviour.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct R {
     /// Exclusive end offset inside the page.
     pub e: u64,
@@ -21,7 +23,9 @@ pub struct R {
 }
 
 /// A page holds all dirty ranges for one 64-KiB slice of the global state.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// PartialEq and Eq are required because State stores pages in a BTreeMap
+/// that is compared with assert_eq! during transaction rollback tests.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct Page {
     pub ranges: BTreeMap<u64, R>,
 }
@@ -59,6 +63,9 @@ pub struct State {
     pub balance_cache: HashMap<[u8; 32], u64>,
 }
 
+/// Inputs and outputs of a transaction grouped by page, in page-local coordinates.
+type PageOps = BTreeMap<u16, (Vec<(u64, u64)>, Vec<Output>)>;
+
 /// Compute the blake3 hash of a single leaf range.
 fn leaf_hash(start: u64, end: u64, owner: &[u8; 32]) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
@@ -75,7 +82,7 @@ pub fn verify_page_proof(root: &[u8; 32], proof: &PageProof) -> bool {
     let mut idx = proof.leaf_index;
     for sibling in &proof.siblings {
         let mut h = blake3::Hasher::new();
-        if idx % 2 == 0 {
+        if idx.is_multiple_of(2) {
             h.update(&hash);
             h.update(sibling);
         } else {
@@ -92,17 +99,27 @@ impl Page {
     /// Look up the local range containing offset `i`.
     fn get(&self, i: u64) -> Option<(u64, u64, [u8; 32])> {
         let (&s, r) = self.ranges.range(..=i).next_back()?;
-        if i < r.e { Some((s, r.e, r.o)) } else { None }
+        if i < r.e {
+            Some((s, r.e, r.o))
+        } else {
+            None
+        }
     }
 
     /// Claim one cell inside this page for `owner`.
     fn mine(&mut self, i: u64, owner: [u8; 32]) {
         let (s, e, old_owner) = self.get(i).unwrap();
-        if old_owner == owner { return; }
+        if old_owner == owner {
+            return;
+        }
         self.ranges.remove(&s);
-        if s < i { self.ranges.insert(s, R { e: i, o: old_owner }); }
+        if s < i {
+            self.ranges.insert(s, R { e: i, o: old_owner });
+        }
         self.ranges.insert(i, R { e: i + 1, o: owner });
-        if i + 1 < e { self.ranges.insert(i + 1, R { e, o: old_owner }); }
+        if i + 1 < e {
+            self.ranges.insert(i + 1, R { e, o: old_owner });
+        }
         self.merge(s);
         self.merge(i);
         self.merge(i + 1);
@@ -134,7 +151,9 @@ impl Page {
     /// Remove a sub-range [start, end) from this page, verifying that every touched cell belongs to `owner`.
     /// Left-over fragments on both sides are returned to `owner`.
     fn remove_range(&mut self, start: u64, end: u64, owner: [u8; 32]) -> bool {
-        if start >= end { return false; }
+        if start >= end {
+            return false;
+        }
         let mut affected = Vec::new();
         let mut cur = start;
         while cur < end {
@@ -142,7 +161,9 @@ impl Page {
                 Some(x) => x,
                 None => return false,
             };
-            if o != owner { return false; }
+            if o != owner {
+                return false;
+            }
             affected.push((s, e));
             cur = e;
         }
@@ -190,9 +211,11 @@ impl Page {
         if self.ranges.is_empty() {
             return [0u8; 32];
         }
-        let mut leaves: Vec<[u8; 32]> = self.ranges.iter().map(|(s, r)| {
-            leaf_hash(*s, r.e, &r.o)
-        }).collect();
+        let mut leaves: Vec<[u8; 32]> = self
+            .ranges
+            .iter()
+            .map(|(s, r)| leaf_hash(*s, r.e, &r.o))
+            .collect();
         while leaves.len() > 1 {
             let mut next = Vec::new();
             for chunk in leaves.chunks(2) {
@@ -222,9 +245,10 @@ impl Page {
             }
         }
         let leaf_idx = leaf_idx?;
-        let mut leaves: Vec<[u8; 32]> = ranges_vec.iter().map(|(s, r)| {
-            leaf_hash(*s, r.e, &r.o)
-        }).collect();
+        let mut leaves: Vec<[u8; 32]> = ranges_vec
+            .iter()
+            .map(|(s, r)| leaf_hash(*s, r.e, &r.o))
+            .collect();
         let mut siblings = Vec::new();
         let mut idx = leaf_idx;
         while leaves.len() > 1 {
@@ -246,7 +270,11 @@ impl Page {
             // If the target is the last element and the level length is odd,
             // the sibling is itself (the leaf is promoted with a self-hash).
             let sibling_idx = if idx % 2 == 0 {
-                if idx + 1 < leaves.len() { idx + 1 } else { idx }
+                if idx + 1 < leaves.len() {
+                    idx + 1
+                } else {
+                    idx
+                }
             } else {
                 idx - 1
             };
@@ -272,7 +300,7 @@ impl Page {
 impl State {
     /// Number of pages required to cover N cells.
     pub fn page_count() -> u64 {
-        (N + PAGE_SIZE - 1) / PAGE_SIZE
+        N.div_ceil(PAGE_SIZE)
     }
 
     /// Size of a specific page (the last page may be smaller than PAGE_SIZE).
@@ -286,11 +314,21 @@ impl State {
     pub fn genesis() -> Self {
         let mut pages = BTreeMap::new();
         let mut ranges = BTreeMap::new();
-        ranges.insert(0, R { e: Self::page_size(0), o: TREASURY });
+        ranges.insert(
+            0,
+            R {
+                e: Self::page_size(0),
+                o: TREASURY,
+            },
+        );
         pages.insert(0, Page { ranges });
         let mut balance_cache = HashMap::new();
         balance_cache.insert(TREASURY, N);
-        Self { pages, locks: BTreeMap::new(), balance_cache }
+        Self {
+            pages,
+            locks: BTreeMap::new(),
+            balance_cache,
+        }
     }
 
     /// Return a clone of the requested page. If the page has never been dirtied, materialise it as fully treasury-owned.
@@ -299,7 +337,13 @@ impl State {
             let size = Self::page_size(page_id);
             let mut ranges = BTreeMap::new();
             if size > 0 {
-                ranges.insert(0, R { e: size, o: TREASURY });
+                ranges.insert(
+                    0,
+                    R {
+                        e: size,
+                        o: TREASURY,
+                    },
+                );
             }
             Page { ranges }
         })
@@ -311,7 +355,13 @@ impl State {
             let size = Self::page_size(page_id);
             let mut ranges = BTreeMap::new();
             if size > 0 {
-                ranges.insert(0, R { e: size, o: TREASURY });
+                ranges.insert(
+                    0,
+                    R {
+                        e: size,
+                        o: TREASURY,
+                    },
+                );
             }
             Page { ranges }
         })
@@ -329,7 +379,9 @@ impl State {
 
     /// Look up the global range that contains cell `i`.
     pub fn get(&self, i: u64) -> Option<(u64, u64, [u8; 32])> {
-        if i >= N { return None; }
+        if i >= N {
+            return None;
+        }
         let page_id = (i / PAGE_SIZE) as u16;
         let offset = i % PAGE_SIZE;
         let page = self.get_page(page_id);
@@ -341,7 +393,9 @@ impl State {
     /// Claim a single cell for `owner`, respecting height-based locks.
     /// If the cell is locked beyond `height`, the operation is a no-op.
     pub fn mine(&mut self, cell: u64, owner: [u8; 32], height: u64) {
-        if cell >= N { return; }
+        if cell >= N {
+            return;
+        }
         // Reject the mining attempt if the target cell is still locked.
         if let Some(&until) = self.locks.get(&cell) {
             if until > height {
@@ -361,7 +415,9 @@ impl State {
                 None => return,
             }
         };
-        if old_owner == owner { return; }
+        if old_owner == owner {
+            return;
+        }
 
         // Mutate the page and record whether it reverted to pristine state.
         let became_pristine = {
@@ -381,12 +437,30 @@ impl State {
     /// Atomically validate and apply a multi-input transaction at the given block height.
     /// All checks run before any mutation. If any page fails, the whole transaction is rejected.
     /// The signature is verified against a hash that includes chain_id and scheme.
-    pub fn tx(&mut self, from: [u8; 32], inputs: &[(u64, u64)], outputs: &[Output], sig: &[u8], height: u64, chain_id: &[u8], scheme: u8) -> bool {
-        if inputs.is_empty() { return false; }
+    // The seven validation parameters mirror the consensus transaction structure,
+    // so the arity is inherent to the protocol rather than a design choice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tx(
+        &mut self,
+        from: [u8; 32],
+        inputs: &[(u64, u64)],
+        outputs: &[Output],
+        sig: &[u8],
+        height: u64,
+        chain_id: &[u8],
+        scheme: u8,
+    ) -> bool {
+        if inputs.is_empty() {
+            return false;
+        }
         let total_in: u64 = inputs.iter().map(|(s, e)| e - s).sum();
         let total_out: u64 = outputs.iter().map(|o| o.end - o.start).sum();
-        if total_in != total_out { return false; }
-        if total_out < MIN { return false; }
+        if total_in != total_out {
+            return false;
+        }
+        if total_out < MIN {
+            return false;
+        }
 
         // Signature verification (treasury transactions are unsigned).
         if from != TREASURY {
@@ -408,7 +482,9 @@ impl State {
             // to enforce replay protection between networks and future signature upgrades.
             h.update(chain_id);
             h.update(&[scheme]);
-            if !crate::crypto::verify(&from, h.finalize().as_bytes(), sig) { return false; }
+            if !crate::crypto::verify(&from, h.finalize().as_bytes(), sig) {
+                return false;
+            }
         }
 
         // Verify ownership and lock status of every input cell without mutating state.
@@ -419,10 +495,14 @@ impl State {
                     Some(x) => x,
                     None => return false,
                 };
-                if owner != from { return false; }
+                if owner != from {
+                    return false;
+                }
                 // Reject the transaction if any input cell is locked beyond the current height.
                 if let Some(&until) = self.locks.get(&cur) {
-                    if until > height { return false; }
+                    if until > height {
+                        return false;
+                    }
                 }
                 cur = en;
             }
@@ -433,17 +513,23 @@ impl State {
         for (in_start, in_end) in inputs {
             let mut covered = 0u64;
             while covered < in_end - in_start {
-                if out_idx >= outputs.len() { return false; }
+                if out_idx >= outputs.len() {
+                    return false;
+                }
                 let o = &outputs[out_idx];
-                if o.start != in_start + covered { return false; }
+                if o.start != in_start + covered {
+                    return false;
+                }
                 covered += o.end - o.start;
                 out_idx += 1;
             }
         }
-        if out_idx != outputs.len() { return false; }
+        if out_idx != outputs.len() {
+            return false;
+        }
 
         // Group inputs and outputs by page, splitting at page boundaries.
-        let mut page_ops: BTreeMap<u16, (Vec<(u64, u64)>, Vec<Output>)> = BTreeMap::new();
+        let mut page_ops: PageOps = BTreeMap::new();
         for (s, e) in inputs {
             let mut cur = *s;
             while cur < *e {
@@ -451,7 +537,11 @@ impl State {
                 let page_end = ((page_id as u64 + 1) * PAGE_SIZE).min(*e);
                 let local_start = cur - page_id as u64 * PAGE_SIZE;
                 let local_end = page_end - page_id as u64 * PAGE_SIZE;
-                page_ops.entry(page_id).or_default().0.push((local_start, local_end));
+                page_ops
+                    .entry(page_id)
+                    .or_default()
+                    .0
+                    .push((local_start, local_end));
                 cur = page_end;
             }
         }
@@ -473,21 +563,25 @@ impl State {
         }
 
         // Every page must balance independently.
-        for (_, (ins, outs)) in &page_ops {
+        for (ins, outs) in page_ops.values() {
             let in_sum: u64 = ins.iter().map(|(s, e)| e - s).sum();
             let out_sum: u64 = outs.iter().map(|o| o.end - o.start).sum();
-            if in_sum != out_sum { return false; }
+            if in_sum != out_sum {
+                return false;
+            }
         }
 
         // Clone affected pages and apply changes speculatively.
         let mut cloned: BTreeMap<u16, Page> = BTreeMap::new();
-        for (page_id, _) in &page_ops {
+        for page_id in page_ops.keys() {
             cloned.insert(*page_id, self.get_page(*page_id));
         }
         for (page_id, (ins, outs)) in &page_ops {
             let page = cloned.get_mut(page_id).unwrap();
             for (s, e) in ins {
-                if !page.remove_range(*s, *e, from) { return false; }
+                if !page.remove_range(*s, *e, from) {
+                    return false;
+                }
             }
             page.insert_outputs(outs);
         }
@@ -529,7 +623,9 @@ impl State {
     /// Atomically transfer cells from FEE_VAULT to the miner as block rewards.
     /// Each claim must reference cells currently owned by FEE_VAULT and not locked.
     pub fn claim_fees(&mut self, miner: [u8; 32], claims: &[Output], height: u64) -> bool {
-        if claims.is_empty() { return true; }
+        if claims.is_empty() {
+            return true;
+        }
         // Verify every claimed cell is owned by FEE_VAULT and not locked.
         for claim in claims {
             let mut cur = claim.start;
@@ -538,15 +634,19 @@ impl State {
                     Some(x) => x,
                     None => return false,
                 };
-                if owner != FEE_VAULT { return false; }
+                if owner != FEE_VAULT {
+                    return false;
+                }
                 if let Some(&until) = self.locks.get(&cur) {
-                    if until > height { return false; }
+                    if until > height {
+                        return false;
+                    }
                 }
                 cur = en;
             }
         }
         // Group by page and apply exactly like a treasury transaction without signature.
-        let mut page_ops: BTreeMap<u16, (Vec<(u64, u64)>, Vec<Output>)> = BTreeMap::new();
+        let mut page_ops: PageOps = BTreeMap::new();
         for claim in claims {
             let mut cur = claim.start;
             while cur < claim.end {
@@ -554,7 +654,11 @@ impl State {
                 let page_end = ((page_id as u64 + 1) * PAGE_SIZE).min(claim.end);
                 let local_start = cur - page_id as u64 * PAGE_SIZE;
                 let local_end = page_end - page_id as u64 * PAGE_SIZE;
-                page_ops.entry(page_id).or_default().0.push((local_start, local_end));
+                page_ops
+                    .entry(page_id)
+                    .or_default()
+                    .0
+                    .push((local_start, local_end));
                 cur = page_end;
             }
             let mut cur = claim.start;
@@ -572,19 +676,23 @@ impl State {
                 cur = page_end;
             }
         }
-        for (_, (ins, outs)) in &page_ops {
+        for (ins, outs) in page_ops.values() {
             let in_sum: u64 = ins.iter().map(|(s, e)| e - s).sum();
             let out_sum: u64 = outs.iter().map(|o| o.end - o.start).sum();
-            if in_sum != out_sum { return false; }
+            if in_sum != out_sum {
+                return false;
+            }
         }
         let mut cloned: BTreeMap<u16, Page> = BTreeMap::new();
-        for (page_id, _) in &page_ops {
+        for page_id in page_ops.keys() {
             cloned.insert(*page_id, self.get_page(*page_id));
         }
         for (page_id, (ins, outs)) in &page_ops {
             let page = cloned.get_mut(page_id).unwrap();
             for (s, e) in ins {
-                if !page.remove_range(*s, *e, FEE_VAULT) { return false; }
+                if !page.remove_range(*s, *e, FEE_VAULT) {
+                    return false;
+                }
             }
             page.insert_outputs(outs);
         }
@@ -616,7 +724,9 @@ impl State {
                     let take = (need - got).min(avail);
                     out.push((base + s, base + s + take));
                     got += take;
-                    if got >= need { return Some(out); }
+                    if got >= need {
+                        return Some(out);
+                    }
                 }
             }
         }
@@ -624,13 +734,17 @@ impl State {
         if owner == TREASURY {
             let dirty: std::collections::HashSet<u16> = self.pages.keys().cloned().collect();
             for page_id in 0..Self::page_count() as u16 {
-                if dirty.contains(&page_id) { continue; }
+                if dirty.contains(&page_id) {
+                    continue;
+                }
                 let base = page_id as u64 * PAGE_SIZE;
                 let size = Self::page_size(page_id);
                 let take = (need - got).min(size);
                 out.push((base, base + take));
                 got += take;
-                if got >= need { return Some(out); }
+                if got >= need {
+                    return Some(out);
+                }
             }
         }
         None
@@ -652,7 +766,9 @@ impl State {
         if owner == TREASURY {
             let dirty: std::collections::HashSet<u16> = self.pages.keys().cloned().collect();
             for page_id in 0..Self::page_count() as u16 {
-                if dirty.contains(&page_id) { continue; }
+                if dirty.contains(&page_id) {
+                    continue;
+                }
                 let base = page_id as u64 * PAGE_SIZE;
                 let size = Self::page_size(page_id);
                 if size >= need {
@@ -687,8 +803,18 @@ mod tests {
     fn tx_rollback_on_invalid_outputs() {
         let mut state = State::genesis();
         let outputs = vec![
-            Output { start: 0, end: 1, to: [2u8; 32], lock: None },
-            Output { start: 2, end: 3, to: [2u8; 32], lock: None }, // gap at 1
+            Output {
+                start: 0,
+                end: 1,
+                to: [2u8; 32],
+                lock: None,
+            },
+            Output {
+                start: 2,
+                end: 3,
+                to: [2u8; 32],
+                lock: None,
+            }, // gap at 1
         ];
         let before = state.clone();
         assert!(!state.tx(TREASURY, &[(0, 3)], &outputs, &[], 0, b"/slash/0.2.0", 0));
@@ -698,18 +824,33 @@ mod tests {
     #[test]
     fn tx_atomic_success() {
         let mut state = State::genesis();
-        let owner = [1u8; 32];
+        // The owner address must be the public half of the signing keypair,
+        // because State::tx verifies the Ed25519 signature against `from`.
+        let (sk, pk) = crate::crypto::generate_keypair();
+        let owner = pk;
         let recipient = [2u8; 32];
-        state.mine(100, owner, 0);
-        state.mine(101, owner, 0);
+        // Mine 50 contiguous cells so the transaction meets the minimum output rule.
+        for i in 100..150 {
+            state.mine(i, owner, 0);
+        }
         let outputs = vec![
-            Output { start: 100, end: 101, to: recipient, lock: None },
-            Output { start: 101, end: 102, to: owner, lock: None },
+            Output {
+                start: 100,
+                end: 125,
+                to: recipient,
+                lock: None,
+            },
+            Output {
+                start: 125,
+                end: 150,
+                to: owner,
+                lock: None,
+            },
         ];
         let mut h = blake3::Hasher::new();
         h.update(&owner);
         h.update(&100u64.to_le_bytes());
-        h.update(&102u64.to_le_bytes());
+        h.update(&150u64.to_le_bytes());
         for o in &outputs {
             h.update(&o.start.to_le_bytes());
             h.update(&o.end.to_le_bytes());
@@ -717,22 +858,36 @@ mod tests {
         }
         h.update(b"/slash/0.2.0");
         h.update(&[0u8]);
-        let (sk, _pk) = crate::crypto::generate_keypair();
         let sig = crate::crypto::sign(&sk, h.finalize().as_bytes());
-        assert!(state.tx(owner, &[(100, 102)], &outputs, &sig, 0, b"/slash/0.2.0", 0));
-        assert_eq!(state.balance(recipient), 1);
-        assert_eq!(state.balance(owner), 1);
+        assert!(state.tx(owner, &[(100, 150)], &outputs, &sig, 0, b"/slash/0.2.0", 0));
+        assert_eq!(state.balance(recipient), 25);
+        assert_eq!(state.balance(owner), 25);
     }
 
     #[test]
     fn tx_rejects_bad_signature() {
         let mut state = State::genesis();
         let owner = [1u8; 32];
-        state.mine(50, owner, 0);
-        state.mine(51, owner, 0);
-        let outputs = vec![Output { start: 50, end: 52, to: [2u8; 32], lock: None }];
+        // Mine 50 contiguous cells so the transaction is otherwise valid.
+        for i in 50..100 {
+            state.mine(i, owner, 0);
+        }
+        let outputs = vec![Output {
+            start: 50,
+            end: 100,
+            to: [2u8; 32],
+            lock: None,
+        }];
         let before = state.clone();
-        assert!(!state.tx(owner, &[(50, 52)], &outputs, &[0u8; 64], 0, b"/slash/0.2.0", 0));
+        assert!(!state.tx(
+            owner,
+            &[(50, 100)],
+            &outputs,
+            &[0u8; 64],
+            0,
+            b"/slash/0.2.0",
+            0
+        ));
         assert_eq!(state.pages, before.pages);
     }
 
@@ -759,22 +914,33 @@ mod tests {
     #[test]
     fn multi_input_cross_page() {
         let mut state = State::genesis();
-        let owner = [1u8; 32];
+        // The signature is verified against the owner address, so the owner
+        // must be the public key matching the signing secret.
+        let (sk, pk) = crate::crypto::generate_keypair();
+        let owner = pk;
         let recipient = [2u8; 32];
-        // Mine cells near the end of page 0 and start of page 1.
-        let cell0 = PAGE_SIZE - 2;
-        let cell1 = PAGE_SIZE + 2;
-        state.mine(cell0, owner, 0);
-        state.mine(cell0 + 1, owner, 0);
-        state.mine(cell1, owner, 0);
-        state.mine(cell1 + 1, owner, 0);
+        // Mine 25 cells near the end of page 0 and 25 at the start of page 1.
+        let cell0 = PAGE_SIZE - 25;
+        let cell1 = PAGE_SIZE;
+        for i in 0..25 {
+            state.mine(cell0 + i, owner, 0);
+            state.mine(cell1 + i, owner, 0);
+        }
         // Spend both ranges in one transaction.
-        let inputs = vec![(cell0, cell0 + 2), (cell1, cell1 + 2)];
+        let inputs = vec![(cell0, cell0 + 25), (cell1, cell1 + 25)];
         let outputs = vec![
-            Output { start: cell0, end: cell0 + 1, to: recipient, lock: None },
-            Output { start: cell0 + 1, end: cell0 + 2, to: owner, lock: None },
-            Output { start: cell1, end: cell1 + 1, to: recipient, lock: None },
-            Output { start: cell1 + 1, end: cell1 + 2, to: owner, lock: None },
+            Output {
+                start: cell0,
+                end: cell0 + 25,
+                to: recipient,
+                lock: None,
+            },
+            Output {
+                start: cell1,
+                end: cell1 + 25,
+                to: owner,
+                lock: None,
+            },
         ];
         let mut h = blake3::Hasher::new();
         h.update(&owner);
@@ -789,25 +955,34 @@ mod tests {
         }
         h.update(b"/slash/0.2.0");
         h.update(&[0u8]);
-        let (sk, _pk) = crate::crypto::generate_keypair();
         let sig = crate::crypto::sign(&sk, h.finalize().as_bytes());
         assert!(state.tx(owner, &inputs, &outputs, &sig, 0, b"/slash/0.2.0", 0));
-        assert_eq!(state.balance(recipient), 2);
-        assert_eq!(state.balance(owner), 2);
+        assert_eq!(state.balance(recipient), 25);
+        assert_eq!(state.balance(owner), 25);
     }
 
     #[test]
     fn locked_cells_cannot_be_mined() {
         let mut state = State::genesis();
-        let owner = [1u8; 32];
-        state.mine(50, owner, 0);
-        // Lock cell 50 until height 10.
-        let outputs = vec![Output { start: 50, end: 51, to: owner, lock: Some(10) }];
-        let (sk, _pk) = crate::crypto::generate_keypair();
+        // The locking transaction is signed, so the owner must be the public
+        // key corresponding to the signing secret.
+        let (sk, pk) = crate::crypto::generate_keypair();
+        let owner = pk;
+        // Mine 50 contiguous cells for the owner.
+        for i in 50..100 {
+            state.mine(i, owner, 0);
+        }
+        // Lock cells 50..100 until height 10.
+        let outputs = vec![Output {
+            start: 50,
+            end: 100,
+            to: owner,
+            lock: Some(10),
+        }];
         let mut h = blake3::Hasher::new();
         h.update(&owner);
         h.update(&50u64.to_le_bytes());
-        h.update(&51u64.to_le_bytes());
+        h.update(&100u64.to_le_bytes());
         for o in &outputs {
             h.update(&o.start.to_le_bytes());
             h.update(&o.end.to_le_bytes());
@@ -819,42 +994,63 @@ mod tests {
         h.update(b"/slash/0.2.0");
         h.update(&[0u8]);
         let sig = crate::crypto::sign(&sk, h.finalize().as_bytes());
-        assert!(state.tx(owner, &[(50, 51)], &outputs, &sig, 0, b"/slash/0.2.0", 0));
-        // Mining at height 5 should fail.
+        assert!(state.tx(owner, &[(50, 100)], &outputs, &sig, 0, b"/slash/0.2.0", 0));
+        // Mining at height 5 should fail because the cells are still locked.
         state.mine(50, [2u8; 32], 5);
-        assert_eq!(state.balance(owner), 1);
-        // Mining at height 10 should succeed.
+        assert_eq!(state.balance(owner), 50);
+        // Mining at height 10 should succeed because the lock has expired.
         state.mine(50, [2u8; 32], 10);
         assert_eq!(state.balance([2u8; 32]), 1);
+        // The remaining 49 cells are still owned by the original owner.
+        assert_eq!(state.balance(owner), 49);
     }
 
     #[test]
     fn fee_claims_move_cells_to_miner() {
         let mut state = State::genesis();
-        // Seed FEE_VAULT with 10 cells from treasury.
-        let out = Output { start: 0, end: 10, to: FEE_VAULT, lock: None };
-        assert!(state.tx(TREASURY, &[(0, 10)], &[out], &[], 0, b"/slash/0.2.0", 0));
-        // Miner claims 5 cells.
-        let claims = vec![Output { start: 0, end: 5, to: [3u8; 32], lock: None }];
+        // Seed FEE_VAULT with 50 cells from treasury.
+        let out = Output {
+            start: 0,
+            end: 50,
+            to: FEE_VAULT,
+            lock: None,
+        };
+        assert!(state.tx(TREASURY, &[(0, 50)], &[out], &[], 0, b"/slash/0.2.0", 0));
+        // Miner claims 25 cells.
+        let claims = vec![Output {
+            start: 0,
+            end: 25,
+            to: [3u8; 32],
+            lock: None,
+        }];
         assert!(state.claim_fees([3u8; 32], &claims, 0));
-        assert_eq!(state.balance(FEE_VAULT), 5);
-        assert_eq!(state.balance([3u8; 32]), 5);
+        assert_eq!(state.balance(FEE_VAULT), 25);
+        assert_eq!(state.balance([3u8; 32]), 25);
     }
 
     #[test]
     fn pristine_page_eviction_reduces_dirty_set() {
         let mut state = State::genesis();
-        let owner = [1u8; 32];
-        // Mine a cell so page 0 becomes dirty.
-        state.mine(10, owner, 0);
+        // The spend transaction is signed, so the owner must be the public
+        // key corresponding to the signing secret.
+        let (sk, pk) = crate::crypto::generate_keypair();
+        let owner = pk;
+        // Mine 50 cells so page 0 becomes dirty.
+        for i in 10..60 {
+            state.mine(i, owner, 0);
+        }
         assert!(state.pages.contains_key(&0));
-        // Transfer the cell back to the treasury.
-        let outputs = vec![Output { start: 10, end: 11, to: TREASURY, lock: None }];
-        let (sk, _pk) = crate::crypto::generate_keypair();
+        // Transfer the cells back to the treasury.
+        let outputs = vec![Output {
+            start: 10,
+            end: 60,
+            to: TREASURY,
+            lock: None,
+        }];
         let mut h = blake3::Hasher::new();
         h.update(&owner);
         h.update(&10u64.to_le_bytes());
-        h.update(&11u64.to_le_bytes());
+        h.update(&60u64.to_le_bytes());
         for o in &outputs {
             h.update(&o.start.to_le_bytes());
             h.update(&o.end.to_le_bytes());
@@ -863,25 +1059,45 @@ mod tests {
         h.update(b"/slash/0.2.0");
         h.update(&[0u8]);
         let sig = crate::crypto::sign(&sk, h.finalize().as_bytes());
-        assert!(state.tx(owner, &[(10, 11)], &outputs, &sig, 0, b"/slash/0.2.0", 0));
+        assert!(state.tx(owner, &[(10, 60)], &outputs, &sig, 0, b"/slash/0.2.0", 0));
         // Page 0 should now be evicted because it is fully treasury-owned again.
         assert!(!state.pages.contains_key(&0));
     }
 
     #[test]
     fn merkle_root_and_proof() {
-        let mut page = Page { ranges: BTreeMap::new() };
-        page.ranges.insert(0, R { e: 10, o: [1u8; 32] });
-        page.ranges.insert(10, R { e: 20, o: [2u8; 32] });
-        page.ranges.insert(20, R { e: 30, o: [3u8; 32] });
-        
+        let mut page = Page {
+            ranges: BTreeMap::new(),
+        };
+        page.ranges.insert(
+            0,
+            R {
+                e: 10,
+                o: [1u8; 32],
+            },
+        );
+        page.ranges.insert(
+            10,
+            R {
+                e: 20,
+                o: [2u8; 32],
+            },
+        );
+        page.ranges.insert(
+            20,
+            R {
+                e: 30,
+                o: [3u8; 32],
+            },
+        );
+
         let root = page.merkle_root();
         let proof = page.merkle_proof(5).unwrap();
         assert!(verify_page_proof(&root, &proof));
-        
+
         let proof2 = page.merkle_proof(15).unwrap();
         assert!(verify_page_proof(&root, &proof2));
-        
+
         let proof3 = page.merkle_proof(25).unwrap();
         assert!(verify_page_proof(&root, &proof3));
     }

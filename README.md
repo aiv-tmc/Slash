@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 
-A cell-based blockchain with RandomX proof-of-work, paged multi-input state (PMIS), adaptive governance via version bits, and layered onion routing for transaction privacy.
+A cell-based blockchain with RandomX proof-of-work, paged multi-input state (PMIS), adaptive governance via version bits, layered onion routing for transaction privacy, and a cell-denominated bonding-curve treasury with a halving emission schedule.
 
 ## Overview
 
@@ -14,33 +14,9 @@ Slash introduces a **Paged Multi-Input State (PMIS)** engine that partitions a g
 - **Atomic cross-page transactions** with speculative execution and rollback.
 - **Light-client verification** through per-page Merkle roots and compact proofs.
 - **Stake-locking** at the cell level for time-bound ownership.
-- **Algorithmic treasury** backed by a linear bonding curve with a 2% sell spread.
+- **Emission-backed security**: a Bitcoin-like subsidy schedule funds the RandomX hash rate from day one.
 
 Consensus is secured by **RandomX proof-of-work**, ensuring CPU-friendly and ASIC-resistant mining. The network supports soft-fork upgrades through **BIP-9 style version bits** with real signal counting and threshold enforcement.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         Application Layer                    │
-│    JSON-RPC API  │  FFI Bindings  │  Wallet (separate repo) │
-├─────────────────────────────────────────────────────────────┤
-│                         P2P Layer                            │
-│  libp2p (gossipsub, mdns, identify, request-response)       │
-├─────────────────────────────────────────────────────────────┤
-│                       Consensus Layer                        │
-│  RandomX PoW  │  Adaptive Difficulty  │  Version Bits       │
-├─────────────────────────────────────────────────────────────┤
-│                        State Engine                          │
-│  PMIS (Paged Multi-Input State)  │  Merkle Proofs  │  Locks │
-├─────────────────────────────────────────────────────────────┤
-│                      Cryptographic Primitives                │
-│  Ed25519  │  X25519  │  AES-256-GCM  │  Blake3  │  VRF      │
-├─────────────────────────────────────────────────────────────┤
-│                        Storage Layer                         │
-│  Atomic Writes  │  Snapshots  │  Pruned Recovery           │
-└─────────────────────────────────────────────────────────────┘
-```
 
 ## Key Features
 
@@ -55,6 +31,11 @@ Consensus is secured by **RandomX proof-of-work**, ensuring CPU-friendly and ASI
 - Cooperative cancellation via `Arc<AtomicBool>` so the event loop never stalls.
 - Context cache with 600-second TTL separates full-memory mining contexts from light verification contexts.
 
+### Emission Schedule (v0.3.0)
+- **Coinbase subsidy** of 500 cells per block at genesis, halving every 4 years (420,480 blocks at a 300-second target).
+- Nine eras; total emission **417,957,120 cells (~41.8 % of supply)** over ~36 years, after which security is fee-funded.
+- Coinbase is a mandatory `txs[0]` treasury transaction paying the miner exactly `subsidy_at(height)`; all other treasury transactions require the treasury signer key.
+
 ### Governance (Version Bits)
 - Soft-fork deployments track lifecycle states: `Defined → Started → LockedIn → Active / Failed`.
 - Real cumulative signal counting against configurable thresholds.
@@ -66,9 +47,9 @@ Consensus is secured by **RandomX proof-of-work**, ensuring CPU-friendly and ASI
 - P2P forwarding uses request-response unicast to the next relay, preventing broadcast-based traffic correlation.
 
 ### Economic Layer
-- **Fee Vault**: Miners claim accumulated fees without a signature.
-- **Bonding Curve**: Linear price growth with 2% sell spread protecting treasury reserves.
-- **Stake Lock**: Cells can be locked until a specific block height, enforced by both mining and transaction validation.
+- **Mandatory Fees**: every transaction pays at least 0.5 % of the transferred amount into the `FEE_VAULT`; miners claim accumulated fees in their blocks.
+- **Bonding Curve Treasury**: linear price growth denominated in cells; buys are paid into `TREASURY_VAULT` and minted atomically in the same block; sells are paid back at 98 % of the curve price, keeping the 2 % spread in the vault.
+- **Treasury Signer**: mint and payout transactions are signed with a dedicated Ed25519 key (key separation: VRF / signer / onion).
 
 ## Build Requirements
 
@@ -112,7 +93,7 @@ cargo test
 cargo test -- --nocapture
 
 # Run a specific test
-cargo test test_mine_genesis_to_tip
+cargo test test_coinbase_amount_matches_schedule
 
 # Run benchmarks
 cargo bench
@@ -137,27 +118,27 @@ cargo bench
 slash/
 ├── src/
 │   ├── lib.rs           # Crate root, testnet flag, save/load helpers
-│   ├── chain.rs         # Block, Chain, validation, PoW verification, version bits
-│   ├── state.rs         # PMIS engine, Page, State, transactions, balance cache
+│   ├── chain.rs         # Block, Chain, validation, coinbase rules, PoW verification, version bits
+│   ├── state.rs         # PMIS engine, Page, State, transactions, min-fee rule, balance cache
 │   ├── crypto.rs        # Ed25519, X25519, AES-GCM, Argon2id, wallet encryption
 │   ├── mining.rs        # RandomX miner with parallel extranonce search
 │   ├── p2p.rs           # libp2p swarm, mempool, sync, onion unicast forwarding
 │   ├── rpc.rs           # JSON-RPC HTTP server (balance, block, tx, proofs)
 │   ├── governance.rs    # Soft-fork rule registry and active rule validation
 │   ├── storage.rs       # Atomic file writes, snapshots, pruned recovery
-│   ├── treasury.rs      # Bonding curve math and treasury state
+│   ├── treasury.rs      # Cell-denominated bonding curve math and treasury state
 │   ├── vrf.rs           # ECVRF-RISTRETTO255-SHA512 prove/verify
 │   ├── onion.rs         # 3-hop onion envelope construction and peeling
 │   ├── ffi.rs           # C-API for external wallet integration
-│   └── simulation.rs    # Economic stress tests (hashrate drop, fee spike)
+│   └── simulation.rs    # Economic stress tests (emission, hashrate drop, fee spike)
 ├── benches/
 │   └── benchmarks.rs    # Criterion benchmarks for tx, PoV, serialization
 ├── tests/
-│   ├── chain_tests.rs   # End-to-end chain, consensus, reorg tests
+│   ├── chain_tests.rs   # End-to-end chain, consensus, coinbase, emission tests
 │   ├── crypto_tests.rs  # Signature, encryption, VRF roundtrip tests
 │   ├── p2p_tests.rs     # Wire format, mempool policy, DoS resistance tests
 │   ├── storage_tests.rs # Atomic storage, snapshot, recovery tests
-│   ├── treasury_tests.rs# Bonding curve arithmetic and persistence tests
+│   ├── treasury_tests.rs# Bonding curve and treasury pairing tests
 │   ├── onion_tests.rs   # Layered decryption and constant-size tests
 │   └── integration_tests.rs # Wallet encryption, sync, staking, pruning
 ├── Cargo.toml
@@ -200,10 +181,27 @@ A C-compatible API is provided for hardware wallet and mobile integration:
 
 ## Network Identifiers
 
-- **Mainnet**: `/slash/0.2.0`
-- **Testnet**: `/slash/test/0.2.0`
+- **Mainnet**: `/slash/0.3.0`
+- **Testnet**: `/slash/test/0.3.0`
 
 The `TESTNET_MODE` atomic boolean switches signature hashing between the two chain IDs, preventing replay across networks.
+
+## Emission Reference
+
+| Era | Heights | Subsidy/block | Era supply |
+|---|---|---|---|
+| 0 | 0 – 420,479 | 500 | 210,240,000 |
+| 1 | 420,480 – 840,959 | 250 | 105,120,000 |
+| 2 | 840,960 – 1,261,439 | 125 | 52,560,000 |
+| 3 | 1,261,440 – 1,681,919 | 62 | 26,069,760 |
+| 4 | 1,681,920 – 2,102,399 | 31 | 13,034,880 |
+| 5 | 2,102,400 – 2,522,879 | 15 | 6,307,200 |
+| 6 | 2,522,880 – 2,943,359 | 7 | 2,943,360 |
+| 7 | 2,943,360 – 3,363,839 | 3 | 1,261,440 |
+| 8 | 3,363,840 – 3,784,319 | 1 | 420,480 |
+| 9+ | from 3,784,320 | 0 | 0 |
+
+Total: **417,957,120 cells (~41.8 % of N)**. See `SLASH_EMISSION_AND_TREASURY_DESIGN.md` for the full specification.
 
 ## Security
 

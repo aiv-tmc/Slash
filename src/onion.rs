@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Fixed ciphertext size for every onion layer after encryption.
 /// All layer ciphertexts are padded to this length so traffic analysis
@@ -39,7 +39,10 @@ pub struct PeelResult {
 /// Pad a variable-length payload to a fixed size by prepending a 2-byte length
 /// and appending zero bytes. The length prefix is hidden inside the AES-GCM ciphertext.
 fn pad_payload(data: &[u8], size: usize) -> Vec<u8> {
-    assert!(data.len() + 2 <= size, "payload exceeds maximum padded size");
+    assert!(
+        data.len() + 2 <= size,
+        "payload exceeds maximum padded size"
+    );
     let mut out = Vec::with_capacity(size);
     out.extend_from_slice(&(data.len() as u16).to_le_bytes());
     out.extend_from_slice(data);
@@ -65,7 +68,10 @@ fn unpad_payload(padded: &[u8]) -> Option<Vec<u8>> {
 /// so all onion messages are indistinguishable on the wire.
 /// Panics if fewer than 3 relays are supplied.
 pub fn create_onion(tx: &crate::chain::Tx, relays: &[[u8; 32]]) -> OnionTx {
-    assert!(relays.len() >= 3, "onion routing requires at least 3 relays");
+    assert!(
+        relays.len() >= 3,
+        "onion routing requires at least 3 relays"
+    );
     let tx_bytes = bincode::serialize(tx).unwrap();
     let padded_tx = pad_payload(&tx_bytes, INNER_SIZE);
 
@@ -78,7 +84,11 @@ pub fn create_onion(tx: &crate::chain::Tx, relays: &[[u8; 32]]) -> OnionTx {
     let final_marker = [0u8; 32];
     let padded_final = pad_payload(&final_marker, LAYER_SIZE);
     let (ct2, nonce2) = crate::crypto::aes_encrypt(&key2, &padded_final);
-    let layer2 = Layer { ephemeral: eph2_pub, nonce: nonce2, ciphertext: ct2 };
+    let layer2 = Layer {
+        ephemeral: eph2_pub,
+        nonce: nonce2,
+        ciphertext: ct2,
+    };
 
     // Layer 1 (middle relay) carries the next-hop address (relay 3).
     let (eph1_sec, eph1_pub) = crate::crypto::x25519_generate();
@@ -87,7 +97,11 @@ pub fn create_onion(tx: &crate::chain::Tx, relays: &[[u8; 32]]) -> OnionTx {
     payload1.extend_from_slice(&relays[2]);
     let padded1 = pad_payload(&payload1, LAYER_SIZE);
     let (ct1, nonce1) = crate::crypto::aes_encrypt(&key1, &padded1);
-    let layer1 = Layer { ephemeral: eph1_pub, nonce: nonce1, ciphertext: ct1 };
+    let layer1 = Layer {
+        ephemeral: eph1_pub,
+        nonce: nonce1,
+        ciphertext: ct1,
+    };
 
     // Layer 0 (entry relay) carries the next-hop address (relay 2).
     let (eph0_sec, eph0_pub) = crate::crypto::x25519_generate();
@@ -96,9 +110,18 @@ pub fn create_onion(tx: &crate::chain::Tx, relays: &[[u8; 32]]) -> OnionTx {
     payload0.extend_from_slice(&relays[1]);
     let padded0 = pad_payload(&payload0, LAYER_SIZE);
     let (ct0, nonce0) = crate::crypto::aes_encrypt(&key0, &padded0);
-    let layer0 = Layer { ephemeral: eph0_pub, nonce: nonce0, ciphertext: ct0 };
+    let layer0 = Layer {
+        ephemeral: eph0_pub,
+        nonce: nonce0,
+        ciphertext: ct0,
+    };
 
-    OnionTx { layers: vec![layer0, layer1, layer2], inner: inner_ct, inner_nonce, final_ephemeral: eph2_pub }
+    OnionTx {
+        layers: vec![layer0, layer1, layer2],
+        inner: inner_ct,
+        inner_nonce,
+        final_ephemeral: eph2_pub,
+    }
 }
 
 /// Remove the outermost onion layer using the relay's X25519 secret.
@@ -119,7 +142,10 @@ pub fn peel(onion: &OnionTx, secret: &[u8; 32]) -> Option<PeelResult> {
         inner_nonce: onion.inner_nonce,
         final_ephemeral: onion.final_ephemeral,
     };
-    Some(PeelResult { next_relay, remaining })
+    Some(PeelResult {
+        next_relay,
+        remaining,
+    })
 }
 
 /// Decrypt the inner transaction when no layers remain.

@@ -5,7 +5,6 @@
 use slash::*;
 
 mod common;
-use common::*;
 
 #[test]
 fn test_ed25519_sign_and_verify() {

@@ -2,11 +2,11 @@
 //! Every test receives its own temporary directory so that on-disk state
 //! never leaks between concurrent runs.
 
+use slash::chain::{verify_pow, Block, Chain, Tx};
+use slash::state::Output;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use slash::chain::{Block, Chain, Tx, verify_pow};
-use slash::state::Output;
 
 /// Create a unique temporary directory, switch the process working directory
 /// into it, and return the path so the caller can clean it up on drop.
@@ -106,7 +106,13 @@ pub fn mine_cell_for(chain: &mut Chain, owner: [u8; 32]) -> u64 {
 /// Create a signed transaction that spends `inputs` and creates `outputs`.
 /// The signature covers the chain identifier and scheme byte to enforce
 /// replay protection and future scheme migration.
-pub fn make_tx(from: [u8; 32], sk: &[u8; 32], inputs: &[(u64, u64)], outputs: &[Output], chain_id: &[u8]) -> Tx {
+pub fn make_tx(
+    from: [u8; 32],
+    sk: &[u8; 32],
+    inputs: &[(u64, u64)],
+    outputs: &[Output],
+    chain_id: &[u8],
+) -> Tx {
     let hash = slash::chain::tx_signature_hash(&from, inputs, outputs, chain_id, 0);
     let sig = slash::crypto::sign(sk, &hash);
     Tx {
@@ -137,7 +143,11 @@ struct WalletFile {
 pub fn save_wallets(entries: &[WalletEntry], password: &str) {
     let plaintext = bincode::serialize(entries).unwrap();
     let (salt, nonce, ciphertext) = slash::crypto::encrypt_wallet(&plaintext, password);
-    let file = WalletFile { salt, nonce, ciphertext };
+    let file = WalletFile {
+        salt,
+        nonce,
+        ciphertext,
+    };
     let encoded = bincode::serialize(&file).unwrap();
     slash::storage::atomic_write("wallet.bin", &encoded).unwrap();
 }
@@ -146,7 +156,8 @@ pub fn save_wallets(entries: &[WalletEntry], password: &str) {
 pub fn load_wallets(password: &str) -> Option<Vec<WalletEntry>> {
     let bytes = std::fs::read("wallet.bin").ok()?;
     let file: WalletFile = bincode::deserialize(&bytes).ok()?;
-    let plaintext = slash::crypto::decrypt_wallet(&file.salt, &file.nonce, &file.ciphertext, password)?;
+    let plaintext =
+        slash::crypto::decrypt_wallet(&file.salt, &file.nonce, &file.ciphertext, password)?;
     bincode::deserialize(&plaintext).ok()
 }
 
@@ -170,7 +181,11 @@ struct TreasuryFile {
 pub fn save_treasury_secret(file: &TreasurySecretFile, password: &str) {
     let plaintext = bincode::serialize(file).unwrap();
     let (salt, nonce, ciphertext) = slash::crypto::encrypt_wallet(&plaintext, password);
-    let wrapper = TreasuryFile { salt, nonce, ciphertext };
+    let wrapper = TreasuryFile {
+        salt,
+        nonce,
+        ciphertext,
+    };
     let encoded = bincode::serialize(&wrapper).unwrap();
     slash::storage::atomic_write("treasury_secret.bin", &encoded).unwrap();
 }
@@ -179,6 +194,11 @@ pub fn save_treasury_secret(file: &TreasurySecretFile, password: &str) {
 pub fn load_treasury_secret(password: &str) -> Option<TreasurySecretFile> {
     let bytes = std::fs::read("treasury_secret.bin").ok()?;
     let wrapper: TreasuryFile = bincode::deserialize(&bytes).ok()?;
-    let plaintext = slash::crypto::decrypt_wallet(&wrapper.salt, &wrapper.nonce, &wrapper.ciphertext, password)?;
+    let plaintext = slash::crypto::decrypt_wallet(
+        &wrapper.salt,
+        &wrapper.nonce,
+        &wrapper.ciphertext,
+        password,
+    )?;
     bincode::deserialize(&plaintext).ok()
 }

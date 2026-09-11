@@ -1,9 +1,9 @@
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
+use aes_gcm::{aead::Aead, Aes256Gcm, Key, KeyInit, Nonce};
+use argon2::Argon2;
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
-use x25519_dalek::{StaticSecret, PublicKey as X25519PublicKey};
-use aes_gcm::{Aes256Gcm, Key, Nonce, aead::Aead, KeyInit};
-use argon2::Argon2;
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::Zeroize;
 
 /// Generate a new Ed25519 signing keypair.
@@ -53,7 +53,9 @@ pub fn aes_encrypt(key: &[u8; 32], plaintext: &[u8]) -> (Vec<u8>, [u8; 12]) {
     let key = Key::<Aes256Gcm>::from_slice(key);
     let cipher = Aes256Gcm::new(key);
     let nonce = rand::random::<[u8; 12]>();
-    let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), plaintext).unwrap();
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .unwrap();
     (ciphertext, nonce)
 }
 
@@ -70,7 +72,9 @@ pub fn aes_decrypt(key: &[u8; 32], nonce: &[u8; 12], ciphertext: &[u8]) -> Optio
 pub fn derive_key(password: &str, salt: &[u8]) -> [u8; 32] {
     let mut key = [0u8; 32];
     let argon2 = Argon2::default();
-    argon2.hash_password_into(password.as_bytes(), salt, &mut key).unwrap();
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .unwrap();
     key
 }
 
@@ -84,14 +88,21 @@ pub fn encrypt_wallet(plaintext: &[u8], password: &str) -> ([u8; 16], [u8; 12], 
     let cipher = Aes256Gcm::new(key);
     let mut nonce = [0u8; 12];
     OsRng.fill_bytes(&mut nonce);
-    let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), plaintext).unwrap();
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .unwrap();
     key_bytes.zeroize();
     (salt, nonce, ciphertext)
 }
 
 /// Decrypt wallet data with AES-256-GCM using a key derived from the user password.
 /// Returns None if the password is wrong or the ciphertext has been tampered with.
-pub fn decrypt_wallet(salt: &[u8; 16], nonce: &[u8; 12], ciphertext: &[u8], password: &str) -> Option<Vec<u8>> {
+pub fn decrypt_wallet(
+    salt: &[u8; 16],
+    nonce: &[u8; 12],
+    ciphertext: &[u8],
+    password: &str,
+) -> Option<Vec<u8>> {
     let mut key_bytes = derive_key(password, salt);
     let key = Key::<Aes256Gcm>::from_slice(&key_bytes);
     let cipher = Aes256Gcm::new(key);

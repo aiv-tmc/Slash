@@ -1,9 +1,9 @@
-use curve25519_dalek::ristretto::{RistrettoPoint, CompressedRistretto};
-use curve25519_dalek::scalar::Scalar;
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
-use sha2::{Sha512, Digest};
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use sha2::{Digest, Sha512};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// A VRF keypair over the Ristretto255 group.
@@ -70,7 +70,11 @@ impl VrfKeypair {
         let s = k + c * self.secret;
 
         let beta = proof_to_hash(&gamma);
-        let proof = VrfProof { gamma, c: c.to_bytes(), s };
+        let proof = VrfProof {
+            gamma,
+            c: c.to_bytes(),
+            s,
+        };
         (beta, proof)
     }
 }
@@ -126,7 +130,9 @@ impl VrfProof {
         }
         let gamma = CompressedRistretto(bytes[..32].try_into().unwrap()).decompress()?;
         let c = bytes[32..64].try_into().unwrap();
-        let s = Option::from(Scalar::from_canonical_bytes(bytes[64..96].try_into().unwrap()))?;
+        let s = Option::from(Scalar::from_canonical_bytes(
+            bytes[64..96].try_into().unwrap(),
+        ))?;
         Some(Self { gamma, c, s })
     }
 }

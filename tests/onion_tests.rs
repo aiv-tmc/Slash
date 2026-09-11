@@ -18,7 +18,12 @@ fn test_onion_create_and_peel() {
     let tx = chain::Tx {
         from: [1u8; 32],
         inputs: vec![(0, 1)],
-        outputs: vec![state::Output { start: 0, end: 1, to: [2u8; 32], lock: None }],
+        outputs: vec![state::Output {
+            start: 0,
+            end: 1,
+            to: [2u8; 32],
+            lock: None,
+        }],
         sig: vec![0u8; 64],
         scheme: 0,
     };
@@ -48,7 +53,12 @@ fn test_onion_decrypt_inner() {
     let tx = chain::Tx {
         from: [1u8; 32],
         inputs: vec![(0, 1)],
-        outputs: vec![state::Output { start: 0, end: 1, to: [2u8; 32], lock: None }],
+        outputs: vec![state::Output {
+            start: 0,
+            end: 1,
+            to: [2u8; 32],
+            lock: None,
+        }],
         sig: vec![0u8; 64],
         scheme: 0,
     };
@@ -76,7 +86,12 @@ fn test_onion_constant_size() {
     let tx = chain::Tx {
         from: [1u8; 32],
         inputs: vec![(0, 1)],
-        outputs: vec![state::Output { start: 0, end: 1, to: [2u8; 32], lock: None }],
+        outputs: vec![state::Output {
+            start: 0,
+            end: 1,
+            to: [2u8; 32],
+            lock: None,
+        }],
         sig: vec![0u8; 64],
         scheme: 0,
     };
@@ -93,18 +108,25 @@ fn test_onion_wrong_relay_fails() {
     let _tmp = setup_test_dir("onion_wrong");
     reset_testnet();
 
-    let (r1_sec, r1_pub) = crypto::x25519_generate();
-    let (_r2_sec, r2_pub) = crypto::x25519_generate();
+    let (_r1_sec, r1_pub) = crypto::x25519_generate();
+    let (r2_sec, r2_pub) = crypto::x25519_generate();
 
     let tx = chain::Tx {
         from: [1u8; 32],
         inputs: vec![(0, 1)],
-        outputs: vec![state::Output { start: 0, end: 1, to: [2u8; 32], lock: None }],
+        outputs: vec![state::Output {
+            start: 0,
+            end: 1,
+            to: [2u8; 32],
+            lock: None,
+        }],
         sig: vec![0u8; 64],
         scheme: 0,
     };
 
     let onion = onion::create_onion(&tx, &[r1_pub, r2_pub, r1_pub]);
+    // Attempt to peel with the second relay's secret instead of the first.
+    // The AES-GCM authentication will fail because the key is wrong.
     let result = onion::peel(&onion, &r2_sec.to_bytes());
     assert!(result.is_none());
 }
@@ -120,6 +142,7 @@ fn test_onion_peel_empty_fails() {
         inner_nonce: [0u8; 12],
         final_ephemeral: [0u8; 32],
     };
+    // Peeling requires at least one layer to derive a shared secret.
     let result = onion::peel(&empty, &[0u8; 32]);
     assert!(result.is_none());
 }
@@ -136,7 +159,12 @@ fn test_onion_serialization_roundtrip() {
     let tx = chain::Tx {
         from: [1u8; 32],
         inputs: vec![(0, 1)],
-        outputs: vec![state::Output { start: 0, end: 1, to: [2u8; 32], lock: None }],
+        outputs: vec![state::Output {
+            start: 0,
+            end: 1,
+            to: [2u8; 32],
+            lock: None,
+        }],
         sig: vec![0u8; 64],
         scheme: 0,
     };

@@ -1,24 +1,24 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use futures::StreamExt;
 use libp2p::{
     gossipsub, identify, mdns, noise, request_response,
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, PeerId, SwarmBuilder, Multiaddr,
+    tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use zeroize::Zeroizing;
 // Import the async_trait macro so that async methods in trait implementations
 // desugar into pinned boxed futures with explicit lifetimes, matching the
 // signature expected by libp2p-request-response's Codec trait.
 use async_trait::async_trait;
 
-use crate::chain::{Block, BlockHeader, Chain, Tx, BlockProcessResult};
+use crate::chain::{Block, BlockHeader, BlockProcessResult, Chain, Tx};
 use crate::mining::Miner;
 
 /// Maximum number of unconfirmed transactions held in the mempool.
@@ -73,7 +73,11 @@ impl request_response::Codec for BincodeCodec {
     /// Read a length-prefixed request frame from the given async I/O source,
     /// then deserialize the payload from bincode into a Req value.
     /// The maximum frame size is capped to prevent memory exhaustion.
-    async fn read_request<T>(&mut self, _protocol: &Self::Protocol, io: &mut T) -> io::Result<Self::Request>
+    async fn read_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Request>
     where
         T: AsyncRead + Unpin + Send,
     {
@@ -83,7 +87,11 @@ impl request_response::Codec for BincodeCodec {
 
     /// Read a length-prefixed response frame from the given async I/O source,
     /// then deserialize the payload from bincode into a Resp value.
-    async fn read_response<T>(&mut self, _protocol: &Self::Protocol, io: &mut T) -> io::Result<Self::Response>
+    async fn read_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+    ) -> io::Result<Self::Response>
     where
         T: AsyncRead + Unpin + Send,
     {
@@ -93,21 +101,33 @@ impl request_response::Codec for BincodeCodec {
 
     /// Serialize a Req value into bincode, prefix it with a 4-byte little-endian
     /// length header, and write the complete frame to the given async I/O sink.
-    async fn write_request<T>(&mut self, _protocol: &Self::Protocol, io: &mut T, req: Self::Request) -> io::Result<()>
+    async fn write_request<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        req: Self::Request,
+    ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let buf = bincode::serialize(&req).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let buf =
+            bincode::serialize(&req).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         write_length_prefixed(io, &buf).await
     }
 
     /// Serialize a Resp value into bincode, prefix it with a 4-byte little-endian
     /// length header, and write the complete frame to the given async I/O sink.
-    async fn write_response<T>(&mut self, _protocol: &Self::Protocol, io: &mut T, res: Self::Response) -> io::Result<()>
+    async fn write_response<T>(
+        &mut self,
+        _protocol: &Self::Protocol,
+        io: &mut T,
+        res: Self::Response,
+    ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let buf = bincode::serialize(&res).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let buf =
+            bincode::serialize(&res).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         write_length_prefixed(io, &buf).await
     }
 }
@@ -115,12 +135,18 @@ impl request_response::Codec for BincodeCodec {
 /// Read a length-prefixed byte vector from an async reader.
 /// The first 4 bytes are interpreted as a little-endian length.
 /// If the declared length exceeds `max`, the function returns an error.
-async fn read_length_prefixed<T: AsyncRead + Unpin + Send>(io: &mut T, max: usize) -> io::Result<Vec<u8>> {
+async fn read_length_prefixed<T: AsyncRead + Unpin + Send>(
+    io: &mut T,
+    max: usize,
+) -> io::Result<Vec<u8>> {
     let mut len_bytes = [0u8; 4];
     io.read_exact(&mut len_bytes).await?;
     let len = u32::from_le_bytes(len_bytes) as usize;
     if len > max {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame exceeds maximum allowed size"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame exceeds maximum allowed size",
+        ));
     }
     let mut buf = vec![0u8; len];
     io.read_exact(&mut buf).await?;
@@ -129,7 +155,10 @@ async fn read_length_prefixed<T: AsyncRead + Unpin + Send>(io: &mut T, max: usiz
 
 /// Write a byte slice to an async writer, prefixing it with a 4-byte
 /// little-endian length header, then flush the sink.
-async fn write_length_prefixed<T: AsyncWrite + Unpin + Send>(io: &mut T, data: &[u8]) -> io::Result<()> {
+async fn write_length_prefixed<T: AsyncWrite + Unpin + Send>(
+    io: &mut T,
+    data: &[u8],
+) -> io::Result<()> {
     let len = data.len() as u32;
     io.write_all(&len.to_le_bytes()).await?;
     io.write_all(data).await?;
@@ -184,7 +213,7 @@ pub struct Node {
     onion_topic: gossipsub::IdentTopic,
     x25519_secret: Zeroizing<[u8; 32]>,
     /// The X25519 public key derived from the secret, advertised to peers
-    /// so they can route onions through this node.
+    /// so they can encrypt onion layers targeted at this node.
     x25519_public: [u8; 32],
     /// Maps a connected peer to its advertised X25519 public key.
     peer_onion_keys: HashMap<PeerId, [u8; 32]>,
@@ -207,16 +236,24 @@ impl Node {
     /// Loads or generates persistent identity keys and X25519 secrets.
     /// Derives the X25519 public key and initializes empty onion routing tables.
     /// Returns the node instance together with a command sender channel.
-    pub async fn new(port: u16, chain: Chain, pruned: bool) -> anyhow::Result<(Self, mpsc::Sender<NodeCommand>)> {
+    pub async fn new(
+        port: u16,
+        chain: Chain,
+        pruned: bool,
+    ) -> anyhow::Result<(Self, mpsc::Sender<NodeCommand>)> {
         let local_key = load_node_keypair();
-        
+
         let mut gossip_cfg = gossipsub::ConfigBuilder::default();
         gossip_cfg.max_transmit_size(4 * 1024 * 1024);
         let gossip_cfg = gossip_cfg.build().unwrap();
-        
+
         let swarm = SwarmBuilder::with_existing_identity(local_key)
             .with_tokio()
-            .with_tcp(tcp::Config::default(), noise::Config::new, || yamux::Config::default())?
+            .with_tcp(
+                tcp::Config::default(),
+                noise::Config::new,
+                yamux::Config::default,
+            )?
             .with_behaviour(|key| {
                 let peer_id = key.public().to_peer_id();
                 let gossip = gossipsub::Behaviour::new(
@@ -224,12 +261,20 @@ impl Node {
                     gossip_cfg,
                 )?;
                 let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), peer_id)?;
-                let identify = identify::Behaviour::new(identify::Config::new("/slash/0.2.0".into(), key.public()));
+                let identify = identify::Behaviour::new(identify::Config::new(
+                    "/slash/1.0.0".into(),
+                    key.public(),
+                ));
                 let req_res = request_response::Behaviour::new(
                     [("/slash/req/1", request_response::ProtocolSupport::Full)],
                     request_response::Config::default(),
                 );
-                Ok(Behaviour { gossipsub: gossip, mdns, identify, req_res })
+                Ok(Behaviour {
+                    gossipsub: gossip,
+                    mdns,
+                    identify,
+                    req_res,
+                })
             })?
             .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
             .build();
@@ -265,21 +310,35 @@ impl Node {
             mining_cancel: Arc::new(AtomicBool::new(false)),
             chain_dirty: false,
         };
-        node.swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", port).parse()?).unwrap();
-        
+        node.swarm
+            .listen_on(format!("/ip4/0.0.0.0/tcp/{}", port).parse()?)
+            .unwrap();
+
         for addr in &node.bootstrap_seeds {
             node.swarm.dial(addr.clone()).ok();
         }
-        
+
         Ok((node, tx))
     }
 
     /// Run the main event loop. Drives the swarm, timers, command channel,
     /// and periodic maintenance tasks until a shutdown command is received.
     pub async fn run(&mut self) {
-        self.swarm.behaviour_mut().gossipsub.subscribe(&self.block_topic).unwrap();
-        self.swarm.behaviour_mut().gossipsub.subscribe(&self.tx_topic).unwrap();
-        self.swarm.behaviour_mut().gossipsub.subscribe(&self.onion_topic).unwrap();
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&self.block_topic)
+            .unwrap();
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&self.tx_topic)
+            .unwrap();
+        self.swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&self.onion_topic)
+            .unwrap();
 
         let mut sync_interval = tokio::time::interval(Duration::from_secs(5));
         let mut bootstrap_timer = tokio::time::interval(Duration::from_secs(10));
@@ -288,6 +347,10 @@ impl Node {
         // Periodic flush of chain state to disk. Writing on every block creates
         // an I/O storm during sync, so we batch changes and flush every 30 s.
         let mut save_timer = tokio::time::interval(Duration::from_secs(30));
+        // Poll the global pending-transaction buffer every 2 seconds so that
+        // transactions submitted via RPC are ingested into the local mempool
+        // and forwarded to the network.
+        let mut pending_tx_timer = tokio::time::interval(Duration::from_secs(2));
 
         loop {
             tokio::select! {
@@ -313,6 +376,9 @@ impl Node {
                         self.chain_dirty = false;
                     }
                 }
+                _ = pending_tx_timer.tick() => {
+                    self.drain_pending_and_broadcast().await;
+                }
                 cmd = self.rx.recv() => {
                     match cmd {
                         Some(NodeCommand::Mine { miner }) => {
@@ -330,6 +396,27 @@ impl Node {
                 event = self.swarm.select_next_some() => {
                     self.handle(event).await;
                 }
+            }
+        }
+    }
+
+    /// Pull all transactions from the global RPC pending buffer, validate them
+    /// against the current mempool state, and broadcast accepted ones over
+    /// gossipsub so the network sees them.
+    async fn drain_pending_and_broadcast(&mut self) {
+        let pending = crate::drain_pending_txs();
+        if pending.is_empty() {
+            return;
+        }
+        let local_peer_id = *self.swarm.local_peer_id();
+        for tx in pending {
+            if self.add_to_mempool(tx.clone(), local_peer_id) {
+                let data = bincode::serialize(&tx).unwrap();
+                self.swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(self.tx_topic.clone(), data)
+                    .ok();
             }
         }
     }
@@ -365,10 +452,13 @@ impl Node {
         }
         // Evict peers that have not sent any message recently.
         let now = Instant::now();
-        self.peer_last_tx.retain(|_, last| now.duration_since(*last) < Duration::from_secs(300));
+        self.peer_last_tx
+            .retain(|_, last| now.duration_since(*last) < Duration::from_secs(300));
         self.peers.retain(|p| self.peer_last_tx.contains_key(p));
         // Also clean up onion key mappings for departed peers.
-        let gone: Vec<PeerId> = self.peer_onion_keys.keys()
+        let gone: Vec<PeerId> = self
+            .peer_onion_keys
+            .keys()
             .filter(|p| !self.peers.contains(p))
             .cloned()
             .collect();
@@ -382,10 +472,15 @@ impl Node {
     /// Request the current tip from all connected peers to discover
     /// whether the local chain is behind.
     async fn sync(&mut self) {
-        if self.peers.is_empty() { return; }
+        if self.peers.is_empty() {
+            return;
+        }
         let req = Req::GetTip;
         for peer in self.peers.iter().cloned().collect::<Vec<_>>() {
-            self.swarm.behaviour_mut().req_res.send_request(&peer, req.clone());
+            self.swarm
+                .behaviour_mut()
+                .req_res
+                .send_request(&peer, req.clone());
         }
     }
 
@@ -405,7 +500,9 @@ impl Node {
         let cancel = Arc::clone(&self.mining_cancel);
         let mut block = match tokio::task::spawn_blocking(move || {
             Miner::mine(tip, height, miner, diff, Some(cancel))
-        }).await {
+        })
+        .await
+        {
             Ok(Some(b)) => b,
             Ok(None) => {
                 println!("[node] mining cancelled");
@@ -416,7 +513,7 @@ impl Node {
                 return;
             }
         };
-        
+
         let take = self.mempool.len().min(crate::chain::MAX_TX_PER_BLOCK);
         block.txs = self.mempool.drain(..take).collect();
         for tx in &block.txs {
@@ -426,33 +523,49 @@ impl Node {
                 }
             }
         }
-        
+
         let fee_balance = self.chain.state.balance(crate::state::FEE_VAULT);
         if fee_balance > 0 {
-            if let Some(ranges) = self.chain.state.select(crate::state::FEE_VAULT, fee_balance) {
+            if let Some(ranges) = self
+                .chain
+                .state
+                .select(crate::state::FEE_VAULT, fee_balance)
+            {
                 for (s, e) in ranges {
-                    block.fee_claims.push(crate::state::Output { start: s, end: e, to: miner, lock: None });
+                    block.fee_claims.push(crate::state::Output {
+                        start: s,
+                        end: e,
+                        to: miner,
+                        lock: None,
+                    });
                 }
             }
         }
-        
+
         // Compute the page Merkle roots for this block before validation.
         let block = self.chain.prepare_block(block);
-        
+
         // Use process_block so that orphan handling and reorg logic are active.
         match self.chain.process_block(block.clone()) {
             Ok(BlockProcessResult::ExtendedMain) | Ok(BlockProcessResult::Reorged { .. }) => {
-                println!("[node] mined block {} cell={} diff={}", block.height, block.mined_cell, block.difficulty);
+                println!(
+                    "[node] mined block {} cell={} diff={}",
+                    block.height, block.mined_cell, block.difficulty
+                );
                 // A locally mined block is immediately persisted so the node never
                 // loses its own work even if it crashes before the next periodic flush.
                 crate::save(&self.chain);
                 self.chain_dirty = false;
                 let data = bincode::serialize(&block).unwrap();
-                self.swarm.behaviour_mut().gossipsub.publish(self.block_topic.clone(), data).ok();
+                self.swarm
+                    .behaviour_mut()
+                    .gossipsub
+                    .publish(self.block_topic.clone(), data)
+                    .ok();
             }
             Ok(BlockProcessResult::Orphan) => {
                 eprintln!("[node] mined block became orphan");
-                let local_peer_id = self.swarm.local_peer_id().clone();
+                let local_peer_id = *self.swarm.local_peer_id();
                 for tx in block.txs {
                     self.add_to_mempool(tx, local_peer_id);
                 }
@@ -462,14 +575,14 @@ impl Node {
             }
             Ok(BlockProcessResult::SideFork) => {
                 println!("[node] mined block became side fork");
-                let local_peer_id = self.swarm.local_peer_id().clone();
+                let local_peer_id = *self.swarm.local_peer_id();
                 for tx in block.txs {
                     self.add_to_mempool(tx, local_peer_id);
                 }
             }
             Err(e) => {
                 eprintln!("[node] mined block failed to apply: {:?}", e);
-                let local_peer_id = self.swarm.local_peer_id().clone();
+                let local_peer_id = *self.swarm.local_peer_id();
                 for tx in block.txs {
                     self.add_to_mempool(tx, local_peer_id);
                 }
@@ -488,16 +601,16 @@ impl Node {
             }
         }
         self.peer_last_tx.insert(peer_id, now);
-        
+
         if !self.validate_tx(&tx) {
             return false;
         }
         if self.mempool.iter().any(|t| same_tx(t, &tx)) {
             return false;
         }
-        
+
         let id = tx_id(&tx);
-        
+
         for (s, e) in &tx.inputs {
             for cell in *s..*e {
                 if self.mempool_spent.contains_key(&cell) {
@@ -505,7 +618,7 @@ impl Node {
                 }
             }
         }
-        
+
         if self.mempool.len() >= MEMPOOL_CAP {
             if let Some(evicted) = self.evict_lowest_fee() {
                 for (s, e) in &evicted.inputs {
@@ -517,7 +630,7 @@ impl Node {
                 return false;
             }
         }
-        
+
         for (s, e) in &tx.inputs {
             for cell in *s..*e {
                 self.mempool_spent.insert(cell, id.clone());
@@ -533,7 +646,9 @@ impl Node {
         let mut lowest_idx = None;
         let mut lowest_fee = u64::MAX;
         for (i, tx) in self.mempool.iter().enumerate() {
-            let fee = tx.outputs.iter()
+            let fee = tx
+                .outputs
+                .iter()
                 .filter(|o| o.to == crate::state::FEE_VAULT)
                 .map(|o| o.end - o.start)
                 .sum::<u64>();
@@ -562,10 +677,15 @@ impl Node {
         if let Some(peel) = crate::onion::peel(&onion, &self.x25519_secret) {
             if peel.next_relay == [0u8; 32] {
                 // We are the exit relay: decrypt the inner transaction.
-                if let Some(tx) = crate::onion::decrypt_inner(&peel.remaining, &self.x25519_secret) {
+                if let Some(tx) = crate::onion::decrypt_inner(&peel.remaining, &self.x25519_secret)
+                {
                     if self.add_to_mempool(tx.clone(), peer_id) {
                         let data = bincode::serialize(&tx).unwrap();
-                        self.swarm.behaviour_mut().gossipsub.publish(self.tx_topic.clone(), data).ok();
+                        self.swarm
+                            .behaviour_mut()
+                            .gossipsub
+                            .publish(self.tx_topic.clone(), data)
+                            .ok();
                     }
                 }
             } else {
@@ -573,9 +693,15 @@ impl Node {
                 // Look up the PeerId associated with the next relay's X25519 public key.
                 if let Some(&next_peer) = self.onion_key_to_peer.get(&peel.next_relay) {
                     let data = bincode::serialize(&peel.remaining).unwrap();
-                    self.swarm.behaviour_mut().req_res.send_request(&next_peer, Req::ForwardOnion(data));
+                    self.swarm
+                        .behaviour_mut()
+                        .req_res
+                        .send_request(&next_peer, Req::ForwardOnion(data));
                 } else {
-                    eprintln!("[p2p] unknown next relay {} for onion, dropping", hex::encode(&peel.next_relay));
+                    eprintln!(
+                        "[p2p] unknown next relay {} for onion, dropping",
+                        hex::encode(peel.next_relay)
+                    );
                 }
             }
         }
@@ -590,13 +716,23 @@ impl Node {
                     self.peers.insert(peer);
                 }
             }
-            SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, .. })) => {
+            SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
+                peer_id,
+                ..
+            })) => {
                 self.peers.insert(peer_id);
                 // Ask the newly identified peer for its X25519 public key
                 // so that onions can be routed to it via unicast.
-                self.swarm.behaviour_mut().req_res.send_request(&peer_id, Req::GetOnionKey);
+                self.swarm
+                    .behaviour_mut()
+                    .req_res
+                    .send_request(&peer_id, Req::GetOnionKey);
             }
-            SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message { message, propagation_source, .. })) => {
+            SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                message,
+                propagation_source,
+                ..
+            })) => {
                 let peer_id = propagation_source;
                 if message.topic == self.block_topic.hash() {
                     if let Ok(b) = bincode::deserialize::<Block>(&message.data) {
@@ -605,22 +741,35 @@ impl Node {
                 } else if message.topic == self.tx_topic.hash() {
                     if let Ok(t) = bincode::deserialize::<Tx>(&message.data) {
                         if self.add_to_mempool(t.clone(), peer_id) {
-                            self.swarm.behaviour_mut().gossipsub.publish(self.tx_topic.clone(), message.data).ok();
+                            self.swarm
+                                .behaviour_mut()
+                                .gossipsub
+                                .publish(self.tx_topic.clone(), message.data)
+                                .ok();
                         }
                     }
                 } else if message.topic == self.onion_topic.hash() {
-                    if let Ok(onion) = bincode::deserialize::<crate::onion::OnionTx>(&message.data) {
+                    if let Ok(onion) = bincode::deserialize::<crate::onion::OnionTx>(&message.data)
+                    {
                         self.handle_onion(onion, peer_id);
                     }
                 }
             }
-            SwarmEvent::Behaviour(BehaviourEvent::ReqRes(request_response::Event::Message { peer, message })) => {
+            SwarmEvent::Behaviour(BehaviourEvent::ReqRes(request_response::Event::Message {
+                peer,
+                message,
+            })) => {
                 match message {
-                    request_response::Message::Request { request, channel, .. } => {
+                    request_response::Message::Request {
+                        request, channel, ..
+                    } => {
                         let resp = match request {
                             Req::GetBlock(h) => {
                                 let block = if h >= self.chain.base_height {
-                                    self.chain.blocks.get((h - self.chain.base_height) as usize).cloned()
+                                    self.chain
+                                        .blocks
+                                        .get((h - self.chain.base_height) as usize)
+                                        .cloned()
                                 } else {
                                     None
                                 };
@@ -631,38 +780,64 @@ impl Node {
                                     Resp::Blocks(vec![])
                                 } else {
                                     let start = (from - self.chain.base_height) as usize;
-                                    let end = (to.min(self.chain.blocks.len() as u64 + self.chain.base_height).saturating_sub(self.chain.base_height)) as usize;
-                                    let blocks: Vec<_> = self.chain.blocks.iter()
+                                    let end = (to
+                                        .min(
+                                            self.chain.blocks.len() as u64 + self.chain.base_height,
+                                        )
+                                        .saturating_sub(self.chain.base_height))
+                                        as usize;
+                                    let blocks: Vec<_> = self
+                                        .chain
+                                        .blocks
+                                        .iter()
                                         .skip(start)
                                         .take(end.saturating_sub(start))
-                                        .cloned().collect();
+                                        .cloned()
+                                        .collect();
                                     Resp::Blocks(blocks)
                                 }
                             }
-                            Req::GetTip => Resp::Tip(self.chain.blocks.len() as u64 - 1 + self.chain.base_height, self.chain.tip_hash()),
+                            Req::GetTip => Resp::Tip(
+                                self.chain.blocks.len() as u64 - 1 + self.chain.base_height,
+                                self.chain.tip_hash(),
+                            ),
                             Req::GetHeaders(from, to) => {
                                 if from < self.chain.base_height {
                                     Resp::Headers(vec![])
                                 } else {
                                     let start = (from - self.chain.base_height) as usize;
-                                    let end = (to.min(self.chain.blocks.len() as u64 + self.chain.base_height).saturating_sub(self.chain.base_height)) as usize;
-                                    let headers: Vec<_> = self.chain.blocks.iter()
+                                    let end = (to
+                                        .min(
+                                            self.chain.blocks.len() as u64 + self.chain.base_height,
+                                        )
+                                        .saturating_sub(self.chain.base_height))
+                                        as usize;
+                                    let headers: Vec<_> = self
+                                        .chain
+                                        .blocks
+                                        .iter()
                                         .skip(start)
                                         .take(end.saturating_sub(start))
-                                        .map(|b| BlockHeader::from_block(b))
+                                        .map(BlockHeader::from_block)
                                         .collect();
                                     Resp::Headers(headers)
                                 }
                             }
                             Req::GetOnionKey => Resp::OnionKey(self.x25519_public),
                             Req::ForwardOnion(data) => {
-                                if let Ok(onion) = bincode::deserialize::<crate::onion::OnionTx>(&data) {
+                                if let Ok(onion) =
+                                    bincode::deserialize::<crate::onion::OnionTx>(&data)
+                                {
                                     self.handle_onion(onion, peer);
                                 }
                                 Resp::Ack
                             }
                         };
-                        self.swarm.behaviour_mut().req_res.send_response(channel, resp).ok();
+                        self.swarm
+                            .behaviour_mut()
+                            .req_res
+                            .send_response(channel, resp)
+                            .ok();
                     }
                     request_response::Message::Response { response, .. } => {
                         match response {
@@ -676,16 +851,20 @@ impl Node {
                                 }
                             }
                             Resp::Tip(height, _) => {
-                                let my = self.chain.blocks.len() as u64 - 1 + self.chain.base_height;
+                                let my =
+                                    self.chain.blocks.len() as u64 - 1 + self.chain.base_height;
                                 if height > my {
                                     let req = Req::GetHeaders(my + 1, height + 1);
                                     self.swarm.behaviour_mut().req_res.send_request(&peer, req);
                                 }
                             }
                             Resp::Headers(headers) => {
+                                // Pair every header with its expected height so the
+                                // height counter lives in the iterator, not in the loop body.
+                                let start_height =
+                                    self.chain.blocks.len() as u64 + self.chain.base_height;
                                 let mut valid = true;
-                                let mut expected_height = self.chain.blocks.len() as u64 + self.chain.base_height;
-                                for h in &headers {
+                                for (expected_height, h) in (start_height..).zip(&headers) {
                                     if h.height != expected_height {
                                         valid = false;
                                         break;
@@ -694,7 +873,6 @@ impl Node {
                                         valid = false;
                                         break;
                                     }
-                                    expected_height += 1;
                                 }
                                 if valid && !headers.is_empty() {
                                     let from = headers[0].height;
@@ -789,7 +967,11 @@ fn tx_id(tx: &Tx) -> Vec<u8> {
 /// Determine whether two transactions are identical in all fields that matter
 /// for mempool deduplication: sender, inputs, outputs, signature and scheme.
 fn same_tx(a: &Tx, b: &Tx) -> bool {
-    a.from == b.from && a.inputs == b.inputs && a.outputs == b.outputs && a.sig == b.sig && a.scheme == b.scheme
+    a.from == b.from
+        && a.inputs == b.inputs
+        && a.outputs == b.outputs
+        && a.sig == b.sig
+        && a.scheme == b.scheme
 }
 
 /// Load the node's Ed25519 identity from disk, or generate and persist a new one.
@@ -805,7 +987,9 @@ fn load_node_keypair() -> libp2p::identity::Keypair {
     let kp = libp2p::identity::Keypair::generate_ed25519();
     let ed_kp = kp.clone().try_into_ed25519().unwrap();
     let secret = ed_kp.to_bytes();
-    let file = NodeKeyFile { secret: secret.to_vec() };
+    let file = NodeKeyFile {
+        secret: secret.to_vec(),
+    };
     let encoded = bincode::serialize(&file).unwrap();
     crate::storage::atomic_write("node_key.bin", &encoded).unwrap();
     kp
@@ -830,7 +1014,10 @@ fn load_x25519_secret() -> Zeroizing<[u8; 32]> {
         }
     }
     let (sec, pub_bytes) = crate::crypto::x25519_generate();
-    let file = X25519File { secret: sec.to_bytes(), public: pub_bytes };
+    let file = X25519File {
+        secret: sec.to_bytes(),
+        public: pub_bytes,
+    };
     let encoded = bincode::serialize(&file).unwrap();
     crate::storage::atomic_write("x25519.bin", &encoded).unwrap();
     Zeroizing::new(sec.to_bytes())

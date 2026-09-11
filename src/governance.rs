@@ -1,5 +1,5 @@
-use serde::{Serialize, Deserialize};
 use crate::chain::{Deployment, DeploymentStatus};
+use serde::{Deserialize, Serialize};
 
 /// A single consensus rule that can be activated through a soft fork.
 /// Each variant represents a concrete change to block or transaction validation.
@@ -62,10 +62,10 @@ pub fn validate_block_rules(block: &crate::chain::Block, rules: &[Rule]) -> bool
                     return false;
                 }
             }
-            Rule::RequireBlockVersion2 => {
-                if block.version < 2 {
-                    return false;
-                }
+            // A guarded arm keeps the rule a single match pattern; when the
+            // version is sufficient the arm does not match and validation continues.
+            Rule::RequireBlockVersion2 if block.version < 2 => {
+                return false;
             }
             _ => {}
         }
@@ -84,11 +84,10 @@ pub fn validate_tx_rules(tx: &crate::chain::Tx, rules: &[Rule]) -> bool {
                     return false;
                 }
             }
-            Rule::AllowScheme1 => {
-                // Scheme 1 is permitted in addition to the default scheme 0.
-                if tx.scheme != 0 && tx.scheme != 1 {
-                    return false;
-                }
+            // Scheme 1 is permitted in addition to the default scheme 0, so
+            // only identifiers outside the set {0, 1} are rejected here.
+            Rule::AllowScheme1 if tx.scheme != 0 && tx.scheme != 1 => {
+                return false;
             }
             _ => {}
         }
