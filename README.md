@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/slash-protocol/slash/actions/workflows/ci.yml/badge.svg)](https://github.com/slash-protocol/slash/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.87%2B-orange.svg)](https://www.rust-lang.org)
 
 A cell-based blockchain with RandomX proof-of-work, paged multi-input state (PMIS), adaptive governance via version bits, layered onion routing for transaction privacy, and a cell-denominated bonding-curve treasury with a halving emission schedule.
 
@@ -31,7 +31,7 @@ Consensus is secured by **RandomX proof-of-work**, ensuring CPU-friendly and ASI
 - Cooperative cancellation via `Arc<AtomicBool>` so the event loop never stalls.
 - Context cache with 600-second TTL separates full-memory mining contexts from light verification contexts.
 
-### Emission Schedule (v0.3.0)
+### Emission Schedule
 - **Coinbase subsidy** of 500 cells per block at genesis, halving every 4 years (420,480 blocks at a 300-second target).
 - Nine eras; total emission **417,957,120 cells (~41.8 % of supply)** over ~36 years, after which security is fee-funded.
 - Coinbase is a mandatory `txs[0]` treasury transaction paying the miner exactly `subsidy_at(height)`; all other treasury transactions require the treasury signer key.
@@ -53,7 +53,7 @@ Consensus is secured by **RandomX proof-of-work**, ensuring CPU-friendly and ASI
 
 ## Build Requirements
 
-- **Rust** 1.75 or later
+- **Rust** 1.87 or later
 - **Cargo**
 - **OpenSSL development headers** (for libp2p noise protocol)
 - **CMake** (for RandomX VM compilation)
@@ -181,8 +181,8 @@ A C-compatible API is provided for hardware wallet and mobile integration:
 
 ## Network Identifiers
 
-- **Mainnet**: `/slash/0.3.0`
-- **Testnet**: `/slash/test/0.3.0`
+- **Mainnet**: `/slash/0.5.0`
+- **Testnet**: `/slash/test/0.5.0`
 
 The `TESTNET_MODE` atomic boolean switches signature hashing between the two chain IDs, preventing replay across networks.
 
@@ -222,3 +222,4 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 - RandomX by the Monero project.
 - libp2p by Protocol Labs.
 - Ed25519/X25519 implementations by the dalek-cryptography project.
+

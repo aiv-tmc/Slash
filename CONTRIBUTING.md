@@ -8,11 +8,17 @@ Thank you for your interest in contributing. This document outlines the process 
 - Focus on technical merit and reproducible evidence.
 - Harassment, discrimination, or personal attacks will not be tolerated.
 
+## Documentation Integrity
+
+- Documentation must never describe consensus rules, APIs, or economic mechanisms that are not implemented in the code on the same branch.
+- Every discovered divergence between documentation and code is filed as an issue with the `docs-drift` label and is resolved by either implementing the behavior or correcting the document, never by leaving the drift in place.
+- The `TEST.md` coverage matrix (when present) is the authoritative mapping between documented rules, implementations, and tests. A documented rule without a matrix row is treated as not implemented.
+
 ## Development Environment
 
 ### Prerequisites
 
-- Rust 1.75 or later (`rustup update stable`)
+- Rust 1.87 or later (`rustup update stable`)
 - Cargo
 - CMake, OpenSSL headers, pkg-config
 
@@ -84,7 +90,7 @@ Example of a bad comment:
    - Use imperative mood: `Add` instead of `Added` or `Adds`.
    - Reference issues where applicable: `Fix side-fork block loss (closes #42)`.
 3. **Push** your branch and open a Pull Request against `main`.
-4. Ensure **CI passes** (build, test, clippy, format, documentation).
+4. Ensure **CI passes** (build, test, clippy, format, documentation, audit).
 5. Request review from at least one maintainer.
 6. Address review feedback promptly and push updates to the same branch.
 
@@ -110,3 +116,4 @@ Reference issues or pull requests: Closes #123, Relates to #456
 ## Questions?
 
 Open a [Discussion](https://github.com/slash-protocol/slash/discussions) or reach out in the development channel linked in the repository readme.
+

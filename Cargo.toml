@@ -1,7 +1,18 @@
 [package]
 name = "slash"
-version = "1.0.0"
+version = "0.5.0"
 edition = "2021"
+# Minimum supported Rust version. The codebase relies on integer
+# `is_multiple_of` (1.87) and `Option::is_none_or` (1.82).
+rust-version = "1.87"
+autobenches = false
+
+[features]
+# Exposes the shared test fixtures as public library API. Test crates and
+# benchmarks build the library with this feature (through the
+# self-referential dev-dependency below), so the fixtures live in exactly
+# one place and public items carry no dead-code lint in any consumer.
+test-utils = []
 
 [dependencies]
 async-trait = "0.1"
@@ -10,12 +21,19 @@ bincode = "1.3"
 blake3 = "1.5"
 chrono = "0.4"
 clap = { version = "4.5", features = ["derive"] }
-criterion = { version = "0.5", features = ["html_reports"] }
 curve25519-dalek = "4.1"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 futures = "0.3"
 hex = "0.4"
-libp2p = { version = "0.54", features = ["tokio", "tcp", "noise", "yamux", "gossipsub", "mdns", "identify", "request-response", "cbor"] }
+# The "cbor" feature stays removed: the request-response codec serializes
+# with length-prefixed bincode through a custom Codec implementation in
+# src/p2p.rs, so the CBOR machinery would be an unused dependency surface.
+# The "kad" feature is required because the peer discovery behaviour in
+# src/p2p.rs instantiates a Kademlia DHT for address propagation.
+# The "macros" feature is required: it re-exports the `NetworkBehaviour`
+# derive macro that generates the `BehaviourEvent` enum and the trait
+# implementation for the composite behaviour struct in src/p2p.rs.
+libp2p = { version = "0.54", features = ["tokio", "tcp", "noise", "yamux", "gossipsub", "mdns", "identify", "request-response", "kad", "macros"] }
 rand = "0.8"
 rpassword = "7.3"
 rust-randomx = "0.7"
@@ -29,6 +47,20 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 anyhow = "1.0"
 
+# Benchmark-only crates stay out of the release dependency graph so that
+# production builds do not compile the Criterion harness.
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+# Self-referential dev-dependency with the test-utils feature. It unifies
+# the feature across the build graph for every test and bench target, so
+# `slash::test_fixtures` resolves in integration tests and benches without
+# passing command-line feature flags.
+slash = { path = ".", features = ["test-utils"] }
+
+# The Criterion harness requires a single entry point. The measurements
+# live in the benches/ modules so every file stays readable;
+# the runner itself only wires the groups together.
 [[bench]]
 name = "benchmarks"
 harness = false
+path = "benches/main.rs"

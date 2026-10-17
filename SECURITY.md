@@ -4,12 +4,6 @@
 
 The following versions of Slash Protocol receive security updates:
 
-| Version | Supported          |
-|---------|--------------------|
-| 0.3.x   | :white_check_mark: |
-| 0.2.x   | :x: (superseded by the v0.3.0 genesis restart) |
-| < 0.2   | :x:                |
-
 ## Reporting a Vulnerability
 
 We take security seriously. If you discover a vulnerability, please follow the responsible disclosure process outlined below.
@@ -39,8 +33,8 @@ We take security seriously. If you discover a vulnerability, please follow the r
 
 | Severity | Description | Example |
 |----------|-------------|---------|
-| Critical | Consensus failure, infinite minting, private key extraction | Invalid PoW bypass; state corruption; **unsigned or mis-shaped coinbase minting subsidy; treasury signer key forgery; emission schedule violation (subsidy != subsidy_at(height))** |
-| High | Network partition, remote code execution, fund theft | P2P unauthenticated commands; mempool DoS; **treasury buy/sell pair replay or double-mint against a single payment** |
+| Critical | Consensus failure, infinite minting, private key extraction | Invalid PoW bypass (including a degenerate zero-difficulty target); state corruption; unsigned or mis-shaped coinbase minting subsidy; treasury signer key forgery; emission schedule violation (subsidy != subsidy_at(height)) |
+| High | Network partition, remote code execution, fund theft | P2P unauthenticated commands; mempool DoS; treasury buy/sell pair replay or double-mint against a single payment |
 | Medium | Information disclosure, performance degradation | Timing attacks on crypto; metadata leaks |
 | Low | Defense in depth, non-exploitable bugs | Missing input validation on admin RPCs |
 
@@ -54,6 +48,7 @@ Emission-critical areas with the highest expected reward:
 - Treasury signature enforcement outside the coinbase.
 - Buy/sell pairing (same-block, ordered, one payment funds exactly one mint).
 - Fee-vault claim validation.
+- Proof-of-work target validation: a zero difficulty must never satisfy `verify_pow`, and the declared difficulty must always equal the retargeted value.
 
 ## Security Checklist for Contributors
 
@@ -67,11 +62,12 @@ Emission-critical areas with the highest expected reward:
 
 The following are acknowledged limitations tracked in the codebase:
 
-- **L5**: `save()` is not atomic across the three storage layers (blocks, state, meta). A crash during save may leave the node in an inconsistent state. Recovery via `load_pruned()` handles most cases, but a true WAL is planned.
+- **L5 (resolved)**: The historical three-layer `save()` was not atomic across blocks, state, and metadata. Persistence now goes through a single manifest snapshot plus a crash-recovery journal: `save_manifest` writes a consistent (blocks, state, base height, checkpoints, version-bit deployments) snapshot, and the journal records applied blocks so that a crash between manifest writes replays committed blocks on load. Recovery additionally rebuilds the bounded `state_history` via `rebuild_state_history()` and prunes expired stake locks.
 - **L6 (resolved)**: `sendRawTx` previously validated without relaying. Transactions are now queued into a global pending buffer that the P2P node drains into the mempool and gossips every 2 seconds.
 - **L11**: Per-PeerId rate limiting can be bypassed by a Sybil attacker generating many PeerIds. Additional IP-based or stake-based rate limiting is under research.
-- **Treasury signer key**: mints and payouts are authorized by a single Ed25519 signer key (`TreasuryState.signer_public`). Loss or compromise of this key is a Critical-severity event. Multisig or HSM-backed signing is planned before mainnet (see the v0.3.0 design document, §10.1).
+- **Treasury signer key**: mints and payouts are authorized by a single Ed25519 signer key (`TreasuryState.signer_public`). Loss or compromise of this key is a Critical-severity event. Multisig or HSM-backed signing is planned before mainnet (see the v0.3.0 design document, §10.1). Nodes that have not configured a signer (all-zero key) refuse every non-coinbase treasury transaction by construction.
 - **Onion metadata**: While onion payloads are encrypted, libp2p connection metadata (who talks to whom) is visible to the transport layer. Guard nodes and traffic padding are future work.
+- **Mempool/consensus parity**: mempool admission (`Chain::validate_tx`) enforces the same structural invariants as block execution (range sanity, non-overlapping inputs, exact output packing, lock cap, minimum fee, scheme gate, signature). Any future validation rule must be added to both paths; the TEST.md matrix tracks this pairing per rule.
 
 ## Cryptographic Dependencies
 
@@ -82,3 +78,4 @@ The following are acknowledged limitations tracked in the codebase:
 - `rust-randomx` 0.7 for proof-of-work
 
 These dependencies are monitored via `cargo audit` in CI.
+
